@@ -127,6 +127,12 @@ describe('command registration', () => {
     const { commands } = makeHarness()
     expect(commands[1]?.input).toEqual({ hint: '<question>' })
   })
+
+  it('keeps descriptions terse like Codex', () => {
+    const { commands } = makeHarness()
+    expect(commands[0]?.description).toBe('Start a side conversation in an ephemeral fork of the current session')
+    expect(commands[1]?.description).toBe('Ask a quick question in an ephemeral fork of the current session')
+  })
 })
 
 describe('/btw (one-shot side question)', () => {
@@ -137,7 +143,7 @@ describe('/btw (one-shot side question)', () => {
 
     const result = await invoke(commands[1]!, '  what is 6*7?  ')
 
-    expect(result).toEqual({ kind: 'success', text: 'The answer is 42.' })
+    expect(result).toEqual({ kind: 'success', text: `The answer is 42.\n\n(btw session: ${String(CHILD_ID)})` })
     expect(subagents.start).toHaveBeenCalledTimes(1)
     expect(subagents.start).toHaveBeenCalledWith('fork', expect.objectContaining({
       label: 'BTW: what is 6*7?',
@@ -151,7 +157,7 @@ describe('/btw (one-shot side question)', () => {
     expect(run.dispose).toHaveBeenCalledTimes(1)
   })
 
-  it('truncates oversized answers with a notice', async () => {
+  it('truncates oversized answers with a notice and keeps the session id', async () => {
     const { subagents, commands } = makeHarness(DEFAULT_DEPS, 20)
     const long = 'x'.repeat(200)
     subagents.start.mockResolvedValue(runWith([{ type: 'text', text: long }]))
@@ -159,9 +165,12 @@ describe('/btw (one-shot side question)', () => {
     const result = await invoke(commands[1]!, 'question')
 
     expect(result.kind).toBe('success')
-    const text = result.kind === 'success' ? result.text : ''
-    expect(text).toHaveLength(20 + '\n\n… (truncated)'.length)
-    expect(text).toContain('… (truncated)')
+    const text = result.kind === 'success' ? result.text : undefined
+    expect(text).toBeDefined()
+    const suffix = `\n\n(btw session: ${String(CHILD_ID)})`
+    expect(text!.endsWith(suffix)).toBe(true)
+    expect(text!.endsWith('… (truncated)' + suffix)).toBe(true)
+    expect(text!.slice(0, -suffix.length)).toHaveLength(20 + '\n\n… (truncated)'.length)
   })
 
   it('rejects an empty question without calling the provider', async () => {
@@ -204,8 +213,7 @@ describe('/side (continuable side thread)', () => {
 
     const result = await invoke(commands[0]!, '  investigate the plugin seams  ')
 
-    expect(result.kind).toBe('success')
-    expect(result.kind === 'success' && result.text).toContain(String(CHILD_ID))
+    expect(result).toEqual({ kind: 'success', text: `Side conversation started: ${String(CHILD_ID)}.` })
     expect(subagents.startContinuable).toHaveBeenCalledTimes(1)
     const spec = subagents.startContinuable.mock.calls[0]![0] as ContinuableStartSpec
     expect(spec.provider).toBe('fork')

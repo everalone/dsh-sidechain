@@ -30,9 +30,7 @@ export function createSidechainCommands(
   return [
     {
       name: 'side',
-      description:
-        'Start a side conversation in an ephemeral fork of the current session. '
-        + 'Usage: /side <question> starts one with an opening question; /side list lists this session\'s side conversations.',
+      description: 'Start a side conversation in an ephemeral fork of the current session',
       handler: async ({ agent, rawInput, signal }) => {
         const missing = missingProvider()
         if (missing !== undefined) return { kind: 'error', text: missing }
@@ -47,12 +45,8 @@ export function createSidechainCommands(
         }
         try {
           const { childId } = await startSideConversation(subagents, agent, arg, deps, signal)
-          return {
-            kind: 'success',
-            text:
-              `Side conversation started: ${childId}. `
-              + 'The main thread keeps running; open the subagent catalog in the web UI to switch to it.',
-          }
+          // The trailing id is the machine-readable jump target for the client card.
+          return { kind: 'success', text: `Side conversation started: ${childId}.` }
         } catch (error) {
           return { kind: 'error', text: `sidechain: failed to start side conversation: ${messageOf(error)}` }
         }
@@ -60,9 +54,7 @@ export function createSidechainCommands(
     },
     {
       name: 'btw',
-      description:
-        'Ask a quick question in a temporary side conversation forked from the current session; '
-        + 'the answer is returned inline and leaves no trace in the main history.',
+      description: 'Ask a quick question in an ephemeral fork of the current session',
       input: { hint: '<question>' },
       handler: async ({ agent, rawInput, signal }) => {
         const question = rawInput.trim()
@@ -76,7 +68,8 @@ export function createSidechainCommands(
           run = await askSideOneShot(subagents, agent, question, deps, signal)
           const result = await run.result
           const text = renderResultText(result.output)
-          return { kind: 'success', text: truncateText(text, maxResultChars) }
+          // The trailing id is the machine-readable jump target for the client card.
+          return { kind: 'success', text: `${truncateText(text, maxResultChars)}\n\n(btw session: ${run.id})` }
         } catch (error) {
           return { kind: 'error', text: `sidechain: /btw failed: ${messageOf(error)}` }
         } finally {
