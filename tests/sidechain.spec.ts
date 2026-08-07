@@ -48,14 +48,14 @@ interface Harness {
   commands: CommandDefinition[]
 }
 
-function makeHarness(deps: SideDeps = DEFAULT_DEPS, maxResultChars = 8000): Harness {
+function makeHarness(deps: SideDeps = DEFAULT_DEPS, maxResultChars = 8000, btwTimeoutMs = 0): Harness {
   const subagents = {
     start: vi.fn(),
     startContinuable: vi.fn(),
     listChildren: vi.fn(),
     getProvider: vi.fn(() => ({ name: deps.providerName })),
   } as unknown as Harness['subagents']
-  const commands = createSidechainCommands(subagents, deps, maxResultChars)
+  const commands = createSidechainCommands(subagents, deps, maxResultChars, btwTimeoutMs)
   return { subagents, commands }
 }
 
@@ -204,6 +204,28 @@ describe('/btw (one-shot side question)', () => {
     expect(result.kind === 'error' && result.text).toContain('/btw failed: boom')
     expect(run.dispose).toHaveBeenCalledTimes(1)
   })
+
+  it('times out a never-settling child and disposes it', async () => {
+    const { subagents, commands } = makeHarness(DEFAULT_DEPS, 8000, 50)
+    const run = runWith([{ type: 'text', text: 'never' }], new Promise<never>(() => {}))
+    subagents.start.mockResolvedValue(run)
+
+    const result = await invoke(commands[1]!, 'question')
+
+    expect(result.kind).toBe('error')
+    expect(result.kind === 'error' && result.text).toContain('/btw failed: timed out after 50 ms')
+    expect(run.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('honors a zero timeout as unlimited', async () => {
+    const { subagents, commands } = makeHarness(DEFAULT_DEPS, 8000, 0)
+    const run = runWith([{ type: 'text', text: 'slow but settles' }])
+    subagents.start.mockResolvedValue(run)
+
+    const result = await invoke(commands[1]!, 'question')
+
+    expect(result.kind).toBe('success')
+  })
 })
 
 describe('/side (continuable side thread)', () => {
@@ -312,7 +334,7 @@ describe('plugin wiring', () => {
         callback({ commands: { register: definition => { registered.push(definition) } } })
       },
     }
-    apply(fakeCtx as never, { providerName: 'fork', persona: SIDE_PERSONA, maxResultChars: 8000 })
+    apply(fakeCtx as never, { providerName: 'fork', persona: SIDE_PERSONA, maxResultChars: 8000, btwTimeoutMs: 120000 })
 
     expect(registered.map(definition => definition.name)).toEqual(['side', 'btw'])
   })
@@ -331,6 +353,7 @@ describe('plugin wiring', () => {
       persona: SIDE_PERSONA,
       readOnlyTools: ['read', 'grep'],
       maxResultChars: 8000,
+      btwTimeoutMs: 120000,
     })
 
     const run = runWith([{ type: 'text', text: 'ok' }])

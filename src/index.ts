@@ -32,6 +32,8 @@ export interface Config {
   readOnlyTools?: string[]
   /** Maximum characters of a one-shot `/btw` answer returned inline. */
   maxResultChars: number
+  /** `/btw` run budget in ms; 0 disables the timeout. */
+  btwTimeoutMs: number
 }
 
 export const Config: z<Config> = z.object({
@@ -39,6 +41,7 @@ export const Config: z<Config> = z.object({
   persona: z.string().default(SIDE_PERSONA),
   readOnlyTools: z.array(z.string()),
   maxResultChars: z.number().default(8000),
+  btwTimeoutMs: z.number().default(120000),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -54,7 +57,9 @@ export function apply(ctx: Context, config: Config): void {
   // Commands are an optional surface: without a command registry the plugin
   // still loads harmlessly in minimal deployments.
   ctx.inject(['commands'], (commandCtx) => {
-    for (const definition of createSidechainCommands(ctx.subagents, deps, config.maxResultChars)) {
+    for (const definition of createSidechainCommands(
+      ctx.subagents, deps, config.maxResultChars, config.btwTimeoutMs,
+    )) {
       commandCtx.commands.register(definition)
     }
   })

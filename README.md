@@ -56,6 +56,7 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 | `persona` | 内置 SIDE_PERSONA | 侧会话 persona；设为空字符串则不覆盖部署 persona |
 | `readOnlyTools` | 无 | 侧会话工具的 allow-list（如 `["read","grep","glob"]`）；缺省不限制工具（由 persona 引导只读行为） |
 | `maxResultChars` | `8000` | `/btw` 答案内联返回的最大字符数（超出截断并提示） |
+| `btwTimeoutMs` | `120000` | `/btw` 运行预算（毫秒）；超时取消子代理并返回错误，`0` 表示不设超时 |
 
 ## 使用
 
@@ -86,6 +87,7 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 - continuable 续聊需要父会话 agent 存活；进程重启后由目录冷恢复。
 - 侧会话 persona 不声明 `{{...}}` 插值变量。
 - 自动跳转是浏览器半部分行为：命令卡片在成功落定时解析文本中的子会话 id 并 `openSubagent()`；解析失败（如文本被改动）则静默退回手动目录入口。
+- **`/btw` 有运行预算**（`btwTimeoutMs`，默认 120 秒）：子代理迟迟不结束（如子代理自己发起了长 sleep/长工具调用）会被取消并 dispose，避免 pending 命令长期压住父会话——真实事故：一个子代理 `bash sleep 600` 让 `/btw` 挂了 10 分钟，期间父会话无法推进。超时兜底后最坏情况是收到一条"timed out"错误而非无限挂起。
 
 ## 开发
 
