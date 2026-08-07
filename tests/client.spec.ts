@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CommandNode } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply } from '../src/client/index'
-import { resolveChildSessionId } from '../src/client/SideCommandCard'
+import { resolveChildSessionId, shouldAutoJump } from '../src/client/SideCommandCard'
 
 const CHILD_ID = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914'
 
@@ -52,6 +52,21 @@ describe('resolveChildSessionId', () => {
   })
 })
 
+describe('shouldAutoJump', () => {
+  it('jumps on a live pending→success transition', () => {
+    expect(shouldAutoJump('pending', { kind: 'success', text: `Side conversation started: ${CHILD_ID}.` })).toBe(true)
+  })
+
+  it('never jumps on a settled (history-replay) mount', () => {
+    expect(shouldAutoJump('settled', { kind: 'success', text: `Side conversation started: ${CHILD_ID}.` })).toBe(false)
+  })
+
+  it('does not jump while running or after failure', () => {
+    expect(shouldAutoJump('pending', null)).toBe(false)
+    expect(shouldAutoJump('pending', { kind: 'error', text: 'boom' })).toBe(false)
+  })
+})
+
 describe('client apply wiring', () => {
   interface RegisteredSlot {
     options: {
@@ -71,8 +86,12 @@ describe('client apply wiring', () => {
           registered.push({ options })
           return () => {}
         },
+        // The real runtime waits for the slot declaration before running the
+        // register callback; the declaration exists in this test context.
+        inject: (_name: string, register: () => () => void) => {
+          register()
+        },
       },
-      effect: (fn: () => unknown) => { fn() },
     }
     return { ctx, registered, openSubagent }
   }

@@ -1,7 +1,10 @@
 /**
  * Command card for `/side` and `/btw` (browser half): renders a compact row
  * and, once the command settles successfully, auto-opens the created side
- * conversation in the subagent view — no manual catalog click.
+ * conversation in the subagent view — no manual catalog click. The jump fires
+ * exactly once per live settle: a card re-mounted from replay history (reopening
+ * the session, a page reload) already observes the settled outcome and must not
+ * yank the view back to the side thread.
  */
 
 import { useEffect, useRef } from 'react'
@@ -21,6 +24,25 @@ export interface SideCommandCardProps extends SideCommandCardInjected {
 export type SideCommandKind = 'side' | 'btw'
 
 /**
+ * The outcome state a card first observes at mount: `pending` while the
+ * command is running, `settled` when it already carried a final outcome
+ * (success or error) — which is what replaying history mounts look like.
+ */
+export type FirstOutcome = 'pending' | 'settled'
+
+/**
+ * Whether the card should auto-open its child: exactly the live
+ * running→success transition. A mount whose first observation is `settled`
+ * is history replay (reopening the session, a page reload) and must not jump.
+ * @param first - the outcome state observed at mount.
+ * @param outcome - the command's current outcome.
+ * @returns whether to auto-open the child conversation.
+ */
+export function shouldAutoJump(first: FirstOutcome | null, outcome: CommandNode['outcome']): boolean {
+  return first === 'pending' && outcome?.kind === 'success'
+}
+
+/**
  * Resolve the created child session id from a settled command node, or
  * undefined while the command is running, failed, or the id is absent.
  * The host pins the id in a stable marker: `/side` texts start with
@@ -37,9 +59,16 @@ export function resolveChildSessionId(node: CommandNode, kind: SideCommandKind):
 /** The command card: minimal row text plus one-shot auto-jump on success. */
 export function SideCommandCard({ node, openChild }: SideCommandCardProps): JSX.Element {
   const jumpedRef = useRef(false)
+  const firstOutcomeRef = useRef<FirstOutcome | null>(null)
   const kind: SideCommandKind = node.name === 'btw' ? 'btw' : 'side'
   useEffect(() => {
-    if (jumpedRef.current) return
+    // Record the mount-time outcome once: `pending` means the card witnessed
+    // the command running (a live settle follows), `settled` means this mount
+    // replayed a finished command and must never jump.
+    if (firstOutcomeRef.current === null) {
+      firstOutcomeRef.current = node.outcome === null ? 'pending' : 'settled'
+    }
+    if (jumpedRef.current || !shouldAutoJump(firstOutcomeRef.current, node.outcome)) return
     const childId = resolveChildSessionId(node, kind)
     if (childId === undefined) return
     jumpedRef.current = true
