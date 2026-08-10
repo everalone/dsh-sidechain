@@ -11,6 +11,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../../.dsh/source/current/packages/core/agent
         version: link:../../.dsh/source/current/packages/core/agent
+      '@deepseek-ai/dsh-client-connection':
+        specifier: link:../../.dsh/source/current/packages/client/connection
+        version: link:../../.dsh/source/current/packages/client/connection
       '@deepseek-ai/dsh-client-locale':
         specifier: link:../../.dsh/source/current/packages/client/locale
         version: link:../../.dsh/source/current/packages/client/locale
@@ -29,6 +32,9 @@ importers:
       '@deepseek-ai/dsh-commands':
         specifier: link:../../.dsh/source/current/packages/interaction/commands
         version: link:../../.dsh/source/current/packages/interaction/commands
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: link:../../.dsh/source/current/packages/host/apiproxy
+        version: link:../../.dsh/source/current/packages/host/apiproxy
       '@deepseek-ai/dsh-llm':
         specifier: link:../../.dsh/source/current/packages/llm/llm
         version: link:../../.dsh/source/current/packages/llm/llm

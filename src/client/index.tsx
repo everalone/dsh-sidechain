@@ -2,34 +2,38 @@
  * dsh-sidechain, browser half: registers compact `/side` and `/btw` command
  * cards into the keyed `conversation.chat.commandview` slot, plus the
  * sidechain right panel — a header action that opens a floating right-edge
- * sidebar listing the current session's side subagents. A card auto-opens
- * the created side conversation in the subagent view when its command settles
- * successfully — the main thread keeps running, the view switches over — and
- * reveals the sidechain panel so the new child shows up in the sidebar.
+ * sidebar listing the current session's side subagents with an embedded
+ * conversation view. When a command settles successfully the card reveals
+ * the panel and selects the new child: its transcript renders in the sidebar
+ * while the main session keeps running untouched.
  */
 
-import type { ClientContext, SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionId, SessionFace, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { SideCommandCard, type SideCommandCardInjected } from './SideCommandCard.tsx'
 import { SidechainPanel, type SidechainPanelInjected } from './SidechainPanel.tsx'
-import { openSidechainPanel } from './panel-state.ts'
+import { openSidechainPanel, revealChild } from './panel-state.ts'
+import { fetchTranscript, sendPrompt } from './sidechain-view.ts'
 import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
 
-export const inject = ['slots', 'sessions', 'locale']
+export const inject = ['slots', 'sessions', 'locale', 'connection']
 
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
+  const connection = ctx.get('connection') as ConnectionHandle
+  const subagents = connection.api.subagents
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-sidechain: sidechain dictionaries')
-  const cardInject = (mode: 'continuable' | 'one-shot') => (parentSessionId: SessionId): SideCommandCardInjected => ({
-    openChild(childSessionId: SessionId): void {
-      sessions.openSubagent({ parentSessionId, childSessionId, mode } satisfies SubagentAddress)
-    },
-    revealPanel(): void {
+  const cardInject = (mode: 'continuable' | 'one-shot') => (_parentSessionId: SessionId): SideCommandCardInjected => ({
+    // A live settle reveals the panel with the new child selected — the main
+    // session never switches (the transcript renders inside the sidebar).
+    revealPanel(childSessionId: SessionId): void {
       openSidechainPanel()
+      revealChild(childSessionId)
     },
   })
   // Wait for the chat view's declaration instead of registering into an
@@ -59,8 +63,14 @@ export function apply(ctx: ClientContext): void {
       order: 20,
       locale: NS,
       inject: (parentSessionId: SessionId): SidechainPanelInjected => ({
-        openChild(address: SubagentAddress): void {
-          sessions.openSubagent(address)
+        readTranscript(address: SubagentAddress) {
+          return fetchTranscript(subagents, address)
+        },
+        sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
+          return sendPrompt(subagents, address, text)
+        },
+        sessionFace(id: SessionId): SessionFace | undefined {
+          return sessions.binding(id)?.session
         },
         refresh(parentSessionId: SessionId): void {
           void sessions.refreshSubagents(parentSessionId)

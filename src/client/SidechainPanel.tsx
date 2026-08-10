@@ -1,39 +1,48 @@
 /**
  * Sidechain right panel (browser half): a floating right-edge sidebar listing
- * the current session's `/side` and `/btw` subagent children, plus the header
- * toggle button that opens it.
+ * the current session's `/side` and `/btw` subagent children, with an
+ * embedded conversation view — selecting a child renders its transcript
+ * (and a composer for continuable threads) INSIDE the panel while the main
+ * session stays untouched.
  *
  * Data rides the runtime's live subagent catalog — `sessions.list` rows under
- * `subagentsByParent` — so the panel needs no bespoke transport: opening the
- * panel arms the catalog feed (`setSubagentCatalogOpen`) and triggers one
- * `refreshSubagents`; rows update as children start, finish, or disappear.
- * The visibility store is module-scoped (`panel-state.ts`), shared with the
- * `/side` / `/btw` cards, which reveal the panel when a command settles.
- *
- * Styling is inline (CSS variables) to match the plugin's other browser code:
- * the harness serves exactly one client artifact, and this package has no CSS
- * pipeline of its own.
+ * `subagentsByParent` — for membership, and the catalog's `subagent.history`
+ * transcript RPC for conversation content (no activation, no navigation).
+ * While the selected child is running, the session face's snapshot feed
+ * drives debounced transcript refreshes, so a `/side` or `/btw` run streams
+ * into the panel live. The visibility + selection store is module-scoped
+ * (`panel-state.ts`), shared with the `/side` / `/btw` cards, which reveal
+ * the panel and select the new child on a live settle.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties,
+} from 'react'
 import type {
-  SessionId, SessionListState, SessionSummary, SubagentAddress, SubagentCatalogSnapshot,
+  SessionFace, SessionId, SessionListState, SessionSummary, SubagentAddress,
+  SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  IconBranchOutline16, IconCloseOutline16, IconRefreshOutline14, StateDot,
+  IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
+  IconRefreshOutline14, IconRightUpOutline14, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
-  closeSidechainPanel, isSidechainPanelOpen,
+  closeSidechainPanel, isSidechainPanelOpen, selectChild, selectedChildId,
   subscribeSidechainPanel, toggleSidechainPanel,
 } from './panel-state.ts'
+import type { TranscriptRow } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
 export interface SidechainPanelInjected {
-  /** Open one catalog child through its exact direct-parent address. */
-  openChild(address: SubagentAddress): void
+  /** Fetch one child's transcript tail page (catalog `subagent.history`). */
+  readTranscript(address: SubagentAddress): Promise<readonly TranscriptRow[] | null>
+  /** Deliver one human message to a continuable child. */
+  sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string): Promise<boolean>
+  /** Resolve a session's live face (snapshot feed) without navigating. */
+  sessionFace(id: SessionId): SessionFace | undefined
   /** Trigger a fresh catalog fetch for the parent session. */
   refresh(parentSessionId: SessionId): void
   /** Arm (true) or disarm (false) the live catalog membership feed. */
@@ -131,7 +140,7 @@ const styles: Record<string, CSSProperties> = {
     background: C.primary, color: '#fff', fontSize: 11, lineHeight: '16px', textAlign: 'center',
   },
   panel: {
-    position: 'fixed', top: 0, right: 0, bottom: 0, width: 320, maxWidth: '80vw',
+    position: 'fixed', top: 0, right: 0, bottom: 0, width: 360, maxWidth: '85vw',
     display: 'flex', flexDirection: 'column',
     background: 'var(--ds-color-bg-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
     boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.12)', zIndex: 200,
@@ -142,6 +151,12 @@ const styles: Record<string, CSSProperties> = {
     padding: '10px 12px', borderBottom: `1px solid ${C.border}`,
   },
   title: { flex: 1, fontWeight: 600, fontSize: 14 },
+  back: {
+    display: 'inline-flex', alignItems: 'center', gap: 2,
+    padding: '2px 4px', border: 'none', borderRadius: 6,
+    background: 'transparent', color: C.text2, cursor: 'pointer', fontSize: 12,
+    flex: 1, textAlign: 'left',
+  },
   runningCount: { color: C.text2, fontSize: 12 },
   iconButton: {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -170,13 +185,45 @@ const styles: Record<string, CSSProperties> = {
     display: 'block', color: C.text2, fontSize: 12,
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
+  transcript: { flex: 1, overflowY: 'auto', padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 },
+  userRow: { alignSelf: 'flex-start', maxWidth: '100%' },
+  userText: {
+    display: 'inline-block', padding: '6px 10px', borderRadius: 10,
+    background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text1,
+    whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13, lineHeight: 1.5,
+  },
+  assistantRow: { alignSelf: 'flex-start', maxWidth: '100%' },
+  assistantText: {
+    display: 'inline-block', padding: '6px 10px', borderRadius: 10,
+    background: 'var(--ds-color-surface-2, #eef2ff)', color: C.text1,
+    whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13, lineHeight: 1.5,
+  },
+  toolRow: { color: C.text2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  toolFailed: { color: C.danger },
+  composer: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '10px 12px', borderTop: `1px solid ${C.border}`,
+  },
+  input: {
+    flex: 1, minWidth: 0, padding: '6px 10px', border: `1px solid ${C.border}`, borderRadius: 8,
+    background: 'var(--ds-color-bg-1, #ffffff)', color: C.text1, fontSize: 13, outline: 'none',
+  },
+  sendButton: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 28, height: 28, padding: 0, border: 'none', borderRadius: 8,
+    background: C.primary, color: '#fff', cursor: 'pointer',
+  },
+  readonly: {
+    padding: '8px 12px', borderTop: `1px solid ${C.border}`,
+    color: C.text2, fontSize: 12, textAlign: 'center',
+  },
 }
 
-/** Render one catalog row; children open their subagent view, diagnostics are inert. */
-function Row({ row, t, onOpen }: {
+/** Render one catalog row; clicking selects it for the embedded view. */
+function Row({ row, t, onSelect }: {
   row: SidechainRow
   t: SidechainPanelProps['t']
-  onOpen: (childSessionId: SessionId, mode: 'one-shot' | 'continuable') => void
+  onSelect: (childSessionId: SessionId) => void
 }): JSX.Element {
   if (row.kind === 'diagnostic') {
     const reason = diagnosticText(row.reason, t)
@@ -198,7 +245,7 @@ function Row({ row, t, onOpen }: {
       style={styles.row}
       title={t('row.open', { label: row.label })}
       aria-label={t('row.open', { label: row.label })}
-      onClick={() => onOpen(row.id, row.mode)}
+      onClick={() => onSelect(row.id)}
     >
       <StateDot state={row.activity === 'running' ? 'ongoing' : 'done'} />
       <span style={styles.content}>
@@ -209,16 +256,48 @@ function Row({ row, t, onOpen }: {
   )
 }
 
+/** One transcript row: user prompt, assistant answer, or a tool line. */
+function TranscriptRowView({ row, t }: { row: TranscriptRow; t: SidechainPanelProps['t'] }): JSX.Element {
+  if (row.kind === 'user') {
+    return (
+      <div style={styles.userRow}>
+        <span style={styles.userText}>{row.text}</span>
+      </div>
+    )
+  }
+  if (row.kind === 'assistant') {
+    return (
+      <div style={styles.assistantRow}>
+        <span style={styles.assistantText}>{row.text}</span>
+      </div>
+    )
+  }
+  return (
+    <div style={{ ...styles.toolRow, ...(row.failed ? styles.toolFailed : {}) }}>
+      {`🔧 ${row.name}${row.failed ? ' ✗' : ''}`}
+    </div>
+  )
+}
+
+/** Debounce window for subscription-driven transcript refreshes (ms). */
+const LIVE_REFRESH_DEBOUNCE_MS = 600
+
 /**
  * The header action: a toggle button plus, while open, the floating right
- * panel. Arming the catalog happens on open and follows the current session;
- * the panel stays mounted across session switches and re-arms per parent.
+ * panel. The panel shows the catalog list, or — once a child is selected —
+ * the child's embedded conversation (transcript + composer for continuable
+ * threads); the main session never switches. Arming the catalog happens on
+ * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSessions, openChild, refresh, setCatalogOpen, t,
+  sessionId, useSessions, readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
-  useEffect(() => subscribeSidechainPanel(() => { setOpen(isSidechainPanelOpen()) }), [])
+  const [selected, setSelected] = useState(selectedChildId)
+  useEffect(() => subscribeSidechainPanel(() => {
+    setOpen(isSidechainPanelOpen())
+    setSelected(selectedChildId())
+  }), [])
 
   const catalogs = useSessions(state => state.subagentsByParent)
   const summaries = useSessions(state => state.byId)
@@ -226,10 +305,13 @@ export function SidechainPanel({
   const rows = useMemo(() => sidechainRows(catalog, summaries), [catalog, summaries])
   const running = runningCount(rows)
 
-  // The injected actions can be recreated per render; keep the effect pinned
-  // to the session transition only, reading the latest actions through a ref.
-  const actionsRef = useRef({ refresh, setCatalogOpen })
-  actionsRef.current = { refresh, setCatalogOpen }
+  // The injected actions can be recreated per render; keep effects pinned to
+  // stable keys, reading the latest actions through a ref.
+  const actionsRef = useRef({ readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen })
+  actionsRef.current = { readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen }
+
+  // Arm the catalog feed and refresh while open; disarm on close or when the
+  // panel moves to another session (the cleanup runs with the old session id).
   useEffect(() => {
     if (!open) return
     const { refresh, setCatalogOpen } = actionsRef.current
@@ -237,6 +319,80 @@ export function SidechainPanel({
     refresh(sessionId)
     return () => { actionsRef.current.setCatalogOpen(sessionId, false) }
   }, [open, sessionId])
+
+  // The selected child's durable address (stable while selection/catalog stay).
+  const address = useMemo<SubagentAddress | undefined>(() => {
+    if (selected === undefined) return undefined
+    const row = rows.find(candidate => candidate.kind === 'child' && candidate.id === selected)
+    return row?.kind === 'child'
+      ? { parentSessionId: sessionId, childSessionId: selected, mode: row.mode }
+      : undefined
+  }, [selected, rows, sessionId])
+
+  // Transcript fetch state; an epoch guard makes stale responses no-ops.
+  const [transcript, setTranscript] = useState<readonly TranscriptRow[] | null>(null)
+  const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const fetchEpoch = useRef(0)
+  const refetch = useCallback(() => {
+    if (address === undefined) return
+    const epoch = ++fetchEpoch.current
+    setTranscriptState('loading')
+    void actionsRef.current.readTranscript(address).then((result) => {
+      if (epoch !== fetchEpoch.current) return
+      setTranscript(result)
+      setTranscriptState(result === null ? 'error' : 'ready')
+    })
+  }, [address])
+  useEffect(() => {
+    if (!open) return
+    refetch()
+  }, [open, refetch])
+
+  // Live feed: subscribe to the child's session face; while anything changes
+  // (frames stream during a run), refresh the transcript after a debounce.
+  const snapshot = useSyncExternalStore(
+    useCallback((onStoreChange: () => void) => {
+      const current = address === undefined
+        ? undefined
+        : actionsRef.current.sessionFace(address.childSessionId)
+      return current === undefined ? () => {} : current.subscribe(onStoreChange)
+    }, [address]),
+    useCallback(() => {
+      const current = address === undefined
+        ? undefined
+        : actionsRef.current.sessionFace(address.childSessionId)
+      return current?.getSnapshot() ?? null
+    }, [address]),
+  )
+  useEffect(() => {
+    if (!open || address === undefined || snapshot === null) return
+    const timer = setTimeout(() => { refetch() }, LIVE_REFRESH_DEBOUNCE_MS)
+    return () => { clearTimeout(timer) }
+  }, [open, address, snapshot, refetch])
+
+  // Keep the newest content in view while a run streams.
+  const transcriptRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = transcriptRef.current
+    if (el !== null) el.scrollTop = el.scrollHeight
+  }, [transcript])
+
+  // Composer state for continuable children.
+  const [draft, setDraft] = useState('')
+  const [sendFailed, setSendFailed] = useState(false)
+  const send = useCallback(async () => {
+    if (address?.mode !== 'continuable') return
+    const text = draft.trim()
+    if (text === '') return
+    setDraft('')
+    setSendFailed(false)
+    const ok = await actionsRef.current.sendPrompt(
+      { parentSessionId: address.parentSessionId, childSessionId: address.childSessionId, mode: 'continuable' },
+      text,
+    )
+    if (!ok) setSendFailed(true)
+    refetch()
+  }, [address, draft, refetch])
 
   const loading = catalog === undefined
     || (catalog.state === 'loading' && catalog.entries.length === 0)
@@ -258,8 +414,20 @@ export function SidechainPanel({
       {open && (
         <aside style={styles.panel} role="complementary" aria-label={t('panel.title')}>
           <div style={styles.header}>
-            <span style={styles.title}>{t('panel.title')}</span>
-            {running > 0 && (
+            {address === undefined ? (
+              <span style={styles.title}>{t('panel.title')}</span>
+            ) : (
+              <button
+                type="button"
+                style={styles.back}
+                title={t('view.back')}
+                onClick={() => { selectChild(undefined) }}
+              >
+                <IconChevronLeftOutline14 />
+                {t('view.back')}
+              </button>
+            )}
+            {address === undefined && running > 0 && (
               <span style={styles.runningCount}>{t('count.running', { count: running })}</span>
             )}
             <button
@@ -267,7 +435,10 @@ export function SidechainPanel({
               style={styles.iconButton}
               title={t('panel.refresh')}
               aria-label={t('panel.refresh')}
-              onClick={() => { actionsRef.current.refresh(sessionId) }}
+              onClick={() => {
+                if (address === undefined) actionsRef.current.refresh(sessionId)
+                else refetch()
+              }}
             >
               <IconRefreshOutline14 />
             </button>
@@ -281,32 +452,75 @@ export function SidechainPanel({
               <IconCloseOutline16 />
             </button>
           </div>
-          <div style={styles.body}>
-            {catalog !== undefined && catalog.state === 'error' && (
-              <div style={styles.error}>
-                <span>{t('panel.error')}</span>
-                <button
-                  type="button"
-                  style={styles.retry}
-                  onClick={() => { actionsRef.current.refresh(sessionId) }}
-                >
-                  {t('panel.retry')}
-                </button>
+          {address === undefined ? (
+            <div style={styles.body}>
+              {catalog !== undefined && catalog.state === 'error' && (
+                <div style={styles.error}>
+                  <span>{t('panel.error')}</span>
+                  <button
+                    type="button"
+                    style={styles.retry}
+                    onClick={() => { actionsRef.current.refresh(sessionId) }}
+                  >
+                    {t('panel.retry')}
+                  </button>
+                </div>
+              )}
+              {loading && <div style={styles.notice}>{t('panel.loading')}</div>}
+              {empty && <div style={styles.notice}>{t('panel.empty')}</div>}
+              {rows.map(row => (
+                <Row
+                  key={row.id}
+                  row={row}
+                  t={t}
+                  onSelect={(childSessionId) => { selectChild(childSessionId) }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <div ref={transcriptRef} style={styles.transcript}>
+                {transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
+                {transcriptState === 'error' && (
+                  <div style={styles.error}>
+                    <span>{t('view.error')}</span>
+                    <button type="button" style={styles.retry} onClick={refetch}>
+                      {t('panel.retry')}
+                    </button>
+                  </div>
+                )}
+                {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
+                  <div style={styles.notice}>{t('view.empty')}</div>
+                )}
+                {(transcript ?? []).map((row, index) => (
+                  <TranscriptRowView key={index} row={row} t={t} />
+                ))}
               </div>
-            )}
-            {loading && <div style={styles.notice}>{t('panel.loading')}</div>}
-            {empty && <div style={styles.notice}>{t('panel.empty')}</div>}
-            {rows.map(row => (
-              <Row
-                key={row.id}
-                row={row}
-                t={t}
-                onOpen={(childSessionId, mode) => {
-                  openChild({ parentSessionId: sessionId, childSessionId, mode })
-                }}
-              />
-            ))}
-          </div>
+              {address.mode === 'one-shot' ? (
+                <div style={styles.readonly}>{t('view.readonly')}</div>
+              ) : (
+                <form
+                  style={styles.composer}
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void send()
+                  }}
+                >
+                  <input
+                    style={styles.input}
+                    value={draft}
+                    placeholder={t('composer.placeholder')}
+                    aria-label={t('composer.sendAria')}
+                    onChange={(event) => { setDraft(event.target.value) }}
+                  />
+                  <button type="submit" style={styles.sendButton} aria-label={t('composer.send')}>
+                    <IconRightUpOutline14 />
+                  </button>
+                </form>
+              )}
+              {sendFailed && <div style={styles.error}>{t('view.sendFailed')}</div>}
+            </div>
+          )}
         </aside>
       )}
     </>
