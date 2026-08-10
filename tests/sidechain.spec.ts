@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { CommandDefinition, CommandInvocation } from '@deepseek-ai/dsh-commands'
+import type { CommandDefinition, CommandId, CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
@@ -64,7 +64,7 @@ function invoke(
   rawInput: string,
   signal = new AbortController().signal,
 ): ReturnType<NonNullable<CommandDefinition['handler']>> {
-  return command.handler({ agent, rawInput, signal } as CommandInvocation)
+  return command.handler({ commandId: 'cmd-test-1' as CommandId, agent, rawInput, signal } as CommandInvocation)
 }
 
 function textOf(block: ContentBlock): string {

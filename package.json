@@ -54,7 +54,7 @@
     "@deepseek-ai/dsh-client-runtime": "link:../../.dsh/source/current/packages/client/runtime",
     "@deepseek-ai/dsh-client-ui-conversation": "link:../../.dsh/source/current/packages/client/ui-conversation",
     "@deepseek-ai/dsh-client-ui-slots": "link:../../.dsh/source/current/packages/client/ui-slots",
-    "@deepseek-ai/dsh-commands": "link:../../.dsh/source/current/packages/ui/commands",
+    "@deepseek-ai/dsh-commands": "link:../../.dsh/source/current/packages/interaction/commands",
     "@deepseek-ai/dsh-llm": "link:../../.dsh/source/current/packages/llm/llm",
     "@deepseek-ai/dsh-session": "link:../../.dsh/source/current/packages/core/session",
     "@deepseek-ai/dsh-subagent": "link:../../.dsh/source/current/packages/subagent/subagent",
