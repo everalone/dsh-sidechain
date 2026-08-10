@@ -13,6 +13,8 @@ import type { CommandNode, SessionId } from '@deepseek-ai/dsh-client-runtime/cli
 /** Business face injected by the slot registration (per session scope). */
 export interface SideCommandCardInjected {
   openChild(childSessionId: SessionId): void
+  /** Reveal the sidechain panel (the new child is listed in the sidebar). */
+  revealPanel?: () => void
 }
 
 /** Composed props: the render site's owner ({ node }) plus the inject share. */
@@ -57,7 +59,7 @@ export function resolveChildSessionId(node: CommandNode, kind: SideCommandKind):
 }
 
 /** The command card: minimal row text plus one-shot auto-jump on success. */
-export function SideCommandCard({ node, openChild }: SideCommandCardProps): JSX.Element {
+export function SideCommandCard({ node, openChild, revealPanel }: SideCommandCardProps): JSX.Element {
   const jumpedRef = useRef(false)
   const firstOutcomeRef = useRef<FirstOutcome | null>(null)
   const kind: SideCommandKind = node.name === 'btw' ? 'btw' : 'side'
@@ -73,7 +75,10 @@ export function SideCommandCard({ node, openChild }: SideCommandCardProps): JSX.
     if (childId === undefined) return
     jumpedRef.current = true
     openChild(childId)
-  }, [node, kind, openChild])
+    // The sidebar reveal rides the same live settle — history replay mounts
+    // must neither jump nor pop the panel open.
+    revealPanel?.()
+  }, [node, kind, openChild, revealPanel])
 
   const outcome = node.outcome
   const label = outcome === null

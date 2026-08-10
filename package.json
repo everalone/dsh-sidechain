@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-sidechain",
   "description": "DSH side-conversation plugin: /side and /btw start a side conversation in an ephemeral fork of the current session (Codex /side & /btw semantics).",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
@@ -53,6 +53,8 @@
     "@deepseek-ai/dsh-agent": "link:../../.dsh/source/current/packages/core/agent",
     "@deepseek-ai/dsh-client-runtime": "link:../../.dsh/source/current/packages/client/runtime",
     "@deepseek-ai/dsh-client-ui-conversation": "link:../../.dsh/source/current/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-client-locale": "link:../../.dsh/source/current/packages/client/locale",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:../../.dsh/source/current/packages/client/ui-primitives",
     "@deepseek-ai/dsh-client-ui-slots": "link:../../.dsh/source/current/packages/client/ui-slots",
     "@deepseek-ai/dsh-commands": "link:../../.dsh/source/current/packages/interaction/commands",
     "@deepseek-ai/dsh-llm": "link:../../.dsh/source/current/packages/llm/llm",

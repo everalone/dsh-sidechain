@@ -3,10 +3,11 @@
  * the slot registration wiring (auto-open of created side conversations).
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CommandNode } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply } from '../src/client/index'
 import { resolveChildSessionId, shouldAutoJump } from '../src/client/SideCommandCard'
+import { isSidechainPanelOpen, resetSidechainPanel } from '../src/client/panel-state'
 
 const CHILD_ID = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914'
 
@@ -72,15 +73,34 @@ describe('client apply wiring', () => {
     options: {
       name: string
       key?: string
-      inject?: (parentSessionId: string) => { openChild: (childSessionId: string) => void }
+      id?: string
+      order?: number
+      locale?: string
+      inject?: (parentSessionId: string) => {
+        openChild: (
+          child: string | { parentSessionId: string; childSessionId: string; mode: 'one-shot' | 'continuable' },
+        ) => void
+        revealPanel?: () => void
+        refresh?: (parentSessionId: string) => void
+        setCatalogOpen?: (parentSessionId: string, open: boolean) => void
+      }
     }
   }
+
+  beforeEach(() => {
+    resetSidechainPanel()
+  })
 
   function fakeCtx() {
     const registered: RegisteredSlot[] = []
     const openSubagent = vi.fn()
+    const refreshSubagents = vi.fn(() => Promise.resolve())
+    const setSubagentCatalogOpen = vi.fn()
+    const registerLocale = vi.fn()
     const ctx = {
-      sessions: { openSubagent },
+      sessions: { openSubagent, refreshSubagents, setSubagentCatalogOpen },
+      locale: { register: registerLocale },
+      effect: (fn: () => void) => { fn() },
       slots: {
         register: (options: RegisteredSlot['options'], _component: unknown) => {
           registered.push({ options })
@@ -93,14 +113,26 @@ describe('client apply wiring', () => {
         },
       },
     }
-    return { ctx, registered, openSubagent }
+    return { ctx, registered, openSubagent, refreshSubagents, setSubagentCatalogOpen }
   }
 
-  it('registers keyed cards for /side and /btw', () => {
+  it('registers keyed cards and the sidechain panel action', () => {
     const { ctx, registered } = fakeCtx()
     apply(ctx as never)
-    expect(registered.map(entry => [entry.options.name, entry.options.key]))
-      .toEqual([['conversation.chat.commandview', 'side'], ['conversation.chat.commandview', 'btw']])
+    expect(registered.map(entry => [entry.options.name, entry.options.key ?? entry.options.id]))
+      .toEqual([
+        ['conversation.chat.commandview', 'side'],
+        ['conversation.chat.commandview', 'btw'],
+        ['conversation.session.header.actions', 'sidechain-panel'],
+      ])
+  })
+
+  it('panel action sits after the subagent catalog in the header', () => {
+    const { ctx, registered } = fakeCtx()
+    apply(ctx as never)
+    const panel = registered.find(entry => entry.options.id === 'sidechain-panel')!
+    expect(panel.options.order).toBe(20)
+    expect(panel.options.locale).toBe('sidechain')
   })
 
   it('/side inject opens the child as a continuable conversation', () => {
@@ -119,5 +151,28 @@ describe('client apply wiring', () => {
     const injected = entry.options.inject!('parent-1')
     injected.openChild(CHILD_ID)
     expect(openSubagent).toHaveBeenCalledWith({ parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'one-shot' })
+  })
+
+  it('card inject reveals the sidechain panel', () => {
+    const { ctx, registered } = fakeCtx()
+    apply(ctx as never)
+    const entry = registered.find(item => item.options.key === 'side')!
+    const injected = entry.options.inject!('parent-1')
+    expect(isSidechainPanelOpen()).toBe(false)
+    injected.revealPanel!()
+    expect(isSidechainPanelOpen()).toBe(true)
+  })
+
+  it('panel inject wires the runtime catalog methods', () => {
+    const { ctx, registered, openSubagent, refreshSubagents, setSubagentCatalogOpen } = fakeCtx()
+    apply(ctx as never)
+    const entry = registered.find(item => item.options.id === 'sidechain-panel')!
+    const injected = entry.options.inject!('parent-1')
+    injected.openChild({ parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' })
+    expect(openSubagent).toHaveBeenCalledWith({ parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' })
+    injected.refresh!('parent-1')
+    expect(refreshSubagents).toHaveBeenCalledWith('parent-1')
+    injected.setCatalogOpen!('parent-1', true)
+    expect(setSubagentCatalogOpen).toHaveBeenCalledWith('parent-1', true)
   })
 })
