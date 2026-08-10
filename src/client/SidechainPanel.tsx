@@ -103,29 +103,6 @@ export function sidechainRows(
   })
 }
 
-/**
- * The platform's resident side agent label: the DeepSeek Harness keeps one
- * background side-conversation agent per main session (continuable, labeled
- * "Side conversation"). It is not a `/side` or `/btw` thread the user
- * started, so the sidechain panel hides it — a user's empty `/side` threads
- * carry the short marker label "Side" (see src/side.ts) and stay visible.
- */
-export const RESIDENT_AGENT_LABEL = 'Side conversation'
-
-/**
- * Keep only the user-facing sidechain rows: everything except the platform's
- * resident side agent (continuable children labeled "Side conversation").
- * @param rows - catalog-derived display rows.
- * @returns rows minus the resident agent.
- */
-export function sidechainChildren(rows: readonly SidechainRow[]): SidechainRow[] {
-  return rows.filter(row => !(
-    row.kind === 'child'
-    && row.mode === 'continuable'
-    && row.label === RESIDENT_AGENT_LABEL
-  ))
-}
-
 /** Number of child rows currently running (the header badge value). */
 export function runningCount(rows: readonly SidechainRow[]): number {
   return rows.filter(row => row.kind === 'child' && row.activity === 'running').length
@@ -332,10 +309,7 @@ export function SidechainPanel({
   const summaries = useSessions(state => state.byId)
   const catalog = catalogs[sessionId]
   const rows = useMemo(() => sidechainRows(catalog, summaries), [catalog, summaries])
-  // Only the user's own `/side` & `/btw` threads: hide the platform's
-  // resident side agent ("Side conversation") so it never "talks by itself".
-  const visibleRows = useMemo(() => sidechainChildren(rows), [rows])
-  const running = runningCount(visibleRows)
+  const running = runningCount(rows)
 
   // The injected actions can be recreated per render; keep effects pinned to
   // stable keys, reading the latest actions through a ref.
@@ -355,16 +329,16 @@ export function SidechainPanel({
   // The selected child's durable address (stable while selection/catalog stay).
   const address = useMemo<SubagentAddress | undefined>(() => {
     if (selected === undefined) return undefined
-    const row = visibleRows.find(candidate => candidate.kind === 'child' && candidate.id === selected)
+    const row = rows.find(candidate => candidate.kind === 'child' && candidate.id === selected)
     return row?.kind === 'child'
       ? { parentSessionId: sessionId, childSessionId: selected, mode: row.mode }
       : undefined
-  }, [selected, visibleRows, sessionId])
+  }, [selected, rows, sessionId])
 
   // The selected child's catalog row (its activity drives the live poll).
   const selectedRow = selected === undefined
     ? undefined
-    : visibleRows.find(candidate => candidate.id === selected)
+    : rows.find(candidate => candidate.id === selected)
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
   const selectedRunning = selectedChild?.activity === 'running'
 
@@ -461,11 +435,9 @@ export function SidechainPanel({
     request(target, false)
   }, [draft, request])
 
-  // Empty = the catalog settled with no user-facing sidechain children (the
-  // platform's resident side agent does not count).
   const loading = catalog === undefined
-    || (catalog.state === 'loading' && visibleRows.length === 0)
-  const empty = catalog !== undefined && catalog.state === 'ready' && visibleRows.length === 0
+    || (catalog.state === 'loading' && catalog.entries.length === 0)
+  const empty = catalog !== undefined && catalog.state === 'ready' && catalog.entries.length === 0
 
   return (
     <>
@@ -540,7 +512,7 @@ export function SidechainPanel({
               )}
               {loading && <div style={styles.notice}>{t('panel.loading')}</div>}
               {empty && <div style={styles.notice}>{t('panel.empty')}</div>}
-              {visibleRows.map(row => (
+              {rows.map(row => (
                 <Row
                   key={row.id}
                   row={row}

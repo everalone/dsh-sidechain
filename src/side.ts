@@ -92,10 +92,7 @@ export function startSideConversation(
   deps: SideDeps,
   signal: AbortSignal,
 ): Promise<ContinuableStart> {
-  // A bare `/side` gets a short marker label — deliberately NOT the harness's
-  // own "Side conversation" agent label, so the sidechain panel can tell the
-  // user's empty side threads apart from the platform's resident side agent.
-  const label = truncateLabel(question) || 'Side'
+  const label = truncateLabel(question) || 'Side conversation'
   return subagents.startContinuable({
     provider: deps.providerName,
     label,

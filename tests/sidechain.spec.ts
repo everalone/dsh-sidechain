@@ -254,7 +254,7 @@ describe('/side (continuable side thread)', () => {
     await invoke(commands[0]!, '')
 
     const spec = subagents.startContinuable.mock.calls[0]![0] as ContinuableStartSpec
-    expect(spec.label).toBe('Side')
+    expect(spec.label).toBe('Side conversation')
     expect(textOf(spec.request.prompt[0]!)).toContain(SIDE_WAITING_NOTE)
   })
 
