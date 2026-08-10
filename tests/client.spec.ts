@@ -165,7 +165,7 @@ describe('client apply wiring', () => {
     const injected = entry.options.inject!('parent-1')
     const address = { parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' }
     const transcript = await injected.readTranscript!(address)
-    expect(history).toHaveBeenCalledWith({ ...address, maxMessages: 200 })
+    expect(history).toHaveBeenCalledWith({ ...address, maxMessages: 20 })
     expect(transcript).toEqual([])
     const accepted = await injected.sendPrompt!(address, '继续')
     expect(prompt).toHaveBeenCalledWith({ ...address, content: [{ type: 'text', text: '继续' }] })

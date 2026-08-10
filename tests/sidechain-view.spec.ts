@@ -57,11 +57,62 @@ describe('transcriptRows', () => {
   it('skips log detail events (chunks, turn brackets, projections)', () => {
     const rows = transcriptRows([
       event('turn/start', 1, { turn: 1 }),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: {} }),
+      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'usage', usage: {} } }),
       event('turn/end', 3, { turn: 1, reason: 'stop' }),
       event('session/end-seed', 4, {}),
     ])
     expect(rows).toEqual([])
+  })
+
+  it('cuts the inherited fork seed at the last session/end-seed', () => {
+    const rows = transcriptRows([
+      event('user/message', 1, { content: [{ type: 'text', text: '父会话的历史提问' }] }),
+      event('session/end-seed', 2, {}),
+      event('user/message', 3, { content: [{ type: 'text', text: '侧链提问' }] }),
+      event('assistant/message', 4, { message: { content: [{ type: 'text', text: '侧链回答' }] } }),
+    ])
+    expect(rows).toEqual([
+      { kind: 'user', text: '侧链提问' },
+      { kind: 'assistant', text: '侧链回答' },
+    ])
+  })
+
+  it('drops the fork boundary prompt row', () => {
+    const rows = transcriptRows([
+      event('session/end-seed', 1, {}),
+      event('user/message', 2, {
+        content: [{ type: 'text', text: 'Side conversation boundary.\n\nEverything before this boundary is reference context only.' }],
+      }),
+      event('assistant/message', 3, { message: { content: [{ type: 'text', text: '好的' }] } }),
+    ])
+    expect(rows).toEqual([{ kind: 'assistant', text: '好的' }])
+  })
+
+  it('accumulates text-delta chunks into a streaming row and supersedes it with the assembled message', () => {
+    const stream = transcriptRows([
+      event('session/end-seed', 1, {}),
+      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
+      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
+    ])
+    expect(stream).toEqual([{ kind: 'assistant', text: '你好，世界' }])
+    const settled = transcriptRows([
+      event('session/end-seed', 1, {}),
+      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
+      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
+      event('assistant/message', 4, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '你好，世界！' }] } }),
+    ])
+    expect(settled).toEqual([{ kind: 'assistant', text: '你好，世界！' }])
+  })
+
+  it('ignores reasoning deltas and non-text chunks', () => {
+    const rows = transcriptRows([
+      event('session/end-seed', 1, {}),
+      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '思考中' } }),
+      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'tool-call-delta', index: 0, id: 'c1', argumentsDelta: '{}' } }),
+      event('assistant/chunk', 4, { turn: 1, step: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } }),
+      event('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '最终答案' }] } }),
+    ])
+    expect(rows).toEqual([{ kind: 'assistant', text: '最终答案' }])
   })
 })
 
@@ -80,7 +131,7 @@ describe('fetchTranscript', () => {
       },
     }))
     const rows = await fetchTranscript({ history } as never, ADDRESS)
-    expect(history).toHaveBeenCalledWith({ ...ADDRESS, maxMessages: 200 })
+    expect(history).toHaveBeenCalledWith({ ...ADDRESS, maxMessages: 20 })
     expect(rows).toEqual([
       { kind: 'user', text: '嗨' },
       { kind: 'assistant', text: '你好' },

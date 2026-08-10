@@ -335,25 +335,6 @@ export function SidechainPanel({
       : undefined
   }, [selected, rows, sessionId])
 
-  // Transcript fetch state; an epoch guard makes stale responses no-ops.
-  const [transcript, setTranscript] = useState<readonly TranscriptRow[] | null>(null)
-  const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
-  const fetchEpoch = useRef(0)
-  const refetch = useCallback(() => {
-    if (address === undefined) return
-    const epoch = ++fetchEpoch.current
-    setTranscriptState('loading')
-    void actionsRef.current.readTranscript(address).then((result) => {
-      if (epoch !== fetchEpoch.current) return
-      setTranscript(result)
-      setTranscriptState(result === null ? 'error' : 'ready')
-    })
-  }, [address])
-  useEffect(() => {
-    if (!open) return
-    refetch()
-  }, [open, refetch])
-
   // The selected child's catalog row (its activity drives the live poll).
   const selectedRow = selected === undefined
     ? undefined
@@ -361,15 +342,51 @@ export function SidechainPanel({
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
   const selectedRunning = selectedChild?.activity === 'running'
 
-  // Poll the transcript tail page while the selected child is running. The
-  // child session is never opened client-side, so its live event frames are
-  // dropped by the runtime (cold session) — the poll is the only reliable
-  // live feed, and the host serves the running child's in-memory snapshot.
+  // Stable key for the selected address (primitive — never churns with
+  // unrelated list re-renders), plus refs the persistent poll reads.
+  const addressKey = address === undefined
+    ? undefined
+    : `${address.parentSessionId}:${address.childSessionId}:${address.mode}`
+  const addressRef = useRef(address)
+  addressRef.current = address
+  const openRef = useRef(open)
+  openRef.current = open
+  const runningRef = useRef(selectedRunning)
+  runningRef.current = selectedRunning
+
+  // Transcript fetch state; an epoch guard makes stale responses no-ops.
+  const [transcript, setTranscript] = useState<readonly TranscriptRow[] | null>(null)
+  const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const fetchEpoch = useRef(0)
+  const request = useCallback((target: SubagentAddress, showLoading: boolean) => {
+    const epoch = ++fetchEpoch.current
+    if (showLoading) setTranscriptState('loading')
+    void actionsRef.current.readTranscript(target).then((result) => {
+      if (epoch !== fetchEpoch.current) return
+      setTranscript(result)
+      setTranscriptState(result === null ? 'error' : 'ready')
+    })
+  }, [])
+
+  // Initial fetch whenever the selection or the session changes.
   useEffect(() => {
-    if (!open || address === undefined || !selectedRunning) return
-    const timer = setInterval(() => { refetch() }, LIVE_POLL_INTERVAL_MS)
+    if (!open) return
+    const target = addressRef.current
+    if (target !== undefined) request(target, true)
+  }, [open, addressKey, request])
+
+  // Persistent live poll: one interval for the component's lifetime, reading
+  // the current address/running state through refs — unrelated list renders
+  // must never reset it (a resetting interval could starve the polls while
+  // frames churn the list store).
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!openRef.current || !runningRef.current) return
+      const target = addressRef.current
+      if (target !== undefined) request(target, false)
+    }, LIVE_POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
-  }, [open, address, selectedRunning, refetch])
+  }, [request])
 
   // One final refresh when the selected child transitions running → inactive
   // (the catalog activity flip), so the settled transcript lands exactly.
@@ -380,34 +397,43 @@ export function SidechainPanel({
       return
     }
     if (prevRunning.current === true && !selectedRunning) {
-      refetch()
+      const target = addressRef.current
+      if (target !== undefined) request(target, false)
     }
     prevRunning.current = selectedRunning
-  }, [selectedChild, selectedRunning, refetch])
+  }, [selectedChild, selectedRunning, request])
 
-  // Keep the newest content in view while a run streams.
+  // Keep the newest content in view while a run streams — but only when the
+  // reader is already near the bottom, so scrolling up to re-read is stable.
   const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const nearBottomRef = useRef(true)
+  const onTranscriptScroll = useCallback(() => {
+    const el = transcriptRef.current
+    if (el === null) return
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }, [])
   useEffect(() => {
     const el = transcriptRef.current
-    if (el !== null) el.scrollTop = el.scrollHeight
+    if (el !== null && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [transcript])
 
   // Composer state for continuable children.
   const [draft, setDraft] = useState('')
   const [sendFailed, setSendFailed] = useState(false)
   const send = useCallback(async () => {
-    if (address?.mode !== 'continuable') return
+    const target = addressRef.current
+    if (target === undefined || target.mode !== 'continuable') return
     const text = draft.trim()
     if (text === '') return
     setDraft('')
     setSendFailed(false)
     const ok = await actionsRef.current.sendPrompt(
-      { parentSessionId: address.parentSessionId, childSessionId: address.childSessionId, mode: 'continuable' },
+      { parentSessionId: target.parentSessionId, childSessionId: target.childSessionId, mode: 'continuable' },
       text,
     )
     if (!ok) setSendFailed(true)
-    refetch()
-  }, [address, draft, refetch])
+    request(target, false)
+  }, [draft, request])
 
   const loading = catalog === undefined
     || (catalog.state === 'loading' && catalog.entries.length === 0)
@@ -452,7 +478,10 @@ export function SidechainPanel({
               aria-label={t('panel.refresh')}
               onClick={() => {
                 if (address === undefined) actionsRef.current.refresh(sessionId)
-                else refetch()
+                else {
+                  const target = addressRef.current
+                  if (target !== undefined) request(target, true)
+                }
               }}
             >
               <IconRefreshOutline14 />
@@ -494,12 +523,19 @@ export function SidechainPanel({
             </div>
           ) : (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-              <div ref={transcriptRef} style={styles.transcript}>
+              <div ref={transcriptRef} style={styles.transcript} onScroll={onTranscriptScroll}>
                 {transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
                 {transcriptState === 'error' && (
                   <div style={styles.error}>
                     <span>{t('view.error')}</span>
-                    <button type="button" style={styles.retry} onClick={refetch}>
+                    <button
+                      type="button"
+                      style={styles.retry}
+                      onClick={() => {
+                        const target = addressRef.current
+                        if (target !== undefined) request(target, true)
+                      }}
+                    >
                       {t('panel.retry')}
                     </button>
                   </div>
