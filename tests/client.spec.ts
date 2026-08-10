@@ -80,7 +80,6 @@ describe('client apply wiring', () => {
         revealPanel?: (childSessionId: string) => void
         readTranscript?: (address: unknown) => Promise<unknown>
         sendPrompt?: (address: unknown, text: string) => Promise<boolean>
-        sessionFace?: (id: string) => unknown
         refresh?: (parentSessionId: string) => void
         setCatalogOpen?: (parentSessionId: string, open: boolean) => void
       }
@@ -171,7 +170,6 @@ describe('client apply wiring', () => {
     const accepted = await injected.sendPrompt!(address, '继续')
     expect(prompt).toHaveBeenCalledWith({ ...address, content: [{ type: 'text', text: '继续' }] })
     expect(accepted).toBe(true)
-    injected.sessionFace!(CHILD_ID)
     injected.refresh!('parent-1')
     expect(refreshSubagents).toHaveBeenCalledWith('parent-1')
     injected.setCatalogOpen!('parent-1', true)

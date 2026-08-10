@@ -8,18 +8,26 @@
  * Data rides the runtime's live subagent catalog — `sessions.list` rows under
  * `subagentsByParent` — for membership, and the catalog's `subagent.history`
  * transcript RPC for conversation content (no activation, no navigation).
- * While the selected child is running, the session face's snapshot feed
- * drives debounced transcript refreshes, so a `/side` or `/btw` run streams
- * into the panel live. The visibility + selection store is module-scoped
- * (`panel-state.ts`), shared with the `/side` / `/btw` cards, which reveal
- * the panel and select the new child on a live settle.
+ * While the selected child is running, a poll refreshes the transcript tail
+ * page (the host serves the live child's in-memory snapshot), so a `/side`
+ * or `/btw` run streams into the panel near-live; the final state lands when
+ * the catalog reports the child inactive.
+ *
+ * The panel deliberately never attaches the child session client-side (no
+ * `sessions.binding` / session-face subscription): instantiating a session
+ * that is never opened leaves it in the runtime's cold state, whose live
+ * event frames are dropped — the transcript would only ever refresh on
+ * unrelated state flips — and the extra scope minting interferes with the
+ * runtime's session staging. Polling keeps the panel a pure RPC consumer.
+ *
+ * The visibility + selection store is module-scoped (`panel-state.ts`),
+ * shared with the `/side` / `/btw` cards, which reveal the panel and select
+ * the new child on a live settle.
  */
 
-import {
-  useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties,
-} from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type {
-  SessionFace, SessionId, SessionListState, SessionSummary, SubagentAddress,
+  SessionId, SessionListState, SessionSummary, SubagentAddress,
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
@@ -41,8 +49,6 @@ export interface SidechainPanelInjected {
   readTranscript(address: SubagentAddress): Promise<readonly TranscriptRow[] | null>
   /** Deliver one human message to a continuable child. */
   sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string): Promise<boolean>
-  /** Resolve a session's live face (snapshot feed) without navigating. */
-  sessionFace(id: SessionId): SessionFace | undefined
   /** Trigger a fresh catalog fetch for the parent session. */
   refresh(parentSessionId: SessionId): void
   /** Arm (true) or disarm (false) the live catalog membership feed. */
@@ -279,8 +285,8 @@ function TranscriptRowView({ row, t }: { row: TranscriptRow; t: SidechainPanelPr
   )
 }
 
-/** Debounce window for subscription-driven transcript refreshes (ms). */
-const LIVE_REFRESH_DEBOUNCE_MS = 600
+/** Poll interval for the selected child's transcript while it is running (ms). */
+const LIVE_POLL_INTERVAL_MS = 1200
 
 /**
  * The header action: a toggle button plus, while open, the floating right
@@ -290,7 +296,7 @@ const LIVE_REFRESH_DEBOUNCE_MS = 600
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSessions, readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen, t,
+  sessionId, useSessions, readTranscript, sendPrompt, refresh, setCatalogOpen, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -307,8 +313,8 @@ export function SidechainPanel({
 
   // The injected actions can be recreated per render; keep effects pinned to
   // stable keys, reading the latest actions through a ref.
-  const actionsRef = useRef({ readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen })
-  actionsRef.current = { readTranscript, sendPrompt, sessionFace, refresh, setCatalogOpen }
+  const actionsRef = useRef({ readTranscript, sendPrompt, refresh, setCatalogOpen })
+  actionsRef.current = { readTranscript, sendPrompt, refresh, setCatalogOpen }
 
   // Arm the catalog feed and refresh while open; disarm on close or when the
   // panel moves to another session (the cleanup runs with the old session id).
@@ -348,27 +354,36 @@ export function SidechainPanel({
     refetch()
   }, [open, refetch])
 
-  // Live feed: subscribe to the child's session face; while anything changes
-  // (frames stream during a run), refresh the transcript after a debounce.
-  const snapshot = useSyncExternalStore(
-    useCallback((onStoreChange: () => void) => {
-      const current = address === undefined
-        ? undefined
-        : actionsRef.current.sessionFace(address.childSessionId)
-      return current === undefined ? () => {} : current.subscribe(onStoreChange)
-    }, [address]),
-    useCallback(() => {
-      const current = address === undefined
-        ? undefined
-        : actionsRef.current.sessionFace(address.childSessionId)
-      return current?.getSnapshot() ?? null
-    }, [address]),
-  )
+  // The selected child's catalog row (its activity drives the live poll).
+  const selectedRow = selected === undefined
+    ? undefined
+    : rows.find(candidate => candidate.id === selected)
+  const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
+  const selectedRunning = selectedChild?.activity === 'running'
+
+  // Poll the transcript tail page while the selected child is running. The
+  // child session is never opened client-side, so its live event frames are
+  // dropped by the runtime (cold session) — the poll is the only reliable
+  // live feed, and the host serves the running child's in-memory snapshot.
   useEffect(() => {
-    if (!open || address === undefined || snapshot === null) return
-    const timer = setTimeout(() => { refetch() }, LIVE_REFRESH_DEBOUNCE_MS)
-    return () => { clearTimeout(timer) }
-  }, [open, address, snapshot, refetch])
+    if (!open || address === undefined || !selectedRunning) return
+    const timer = setInterval(() => { refetch() }, LIVE_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [open, address, selectedRunning, refetch])
+
+  // One final refresh when the selected child transitions running → inactive
+  // (the catalog activity flip), so the settled transcript lands exactly.
+  const prevRunning = useRef<boolean | undefined>(undefined)
+  useEffect(() => {
+    if (selectedChild === undefined) {
+      prevRunning.current = undefined
+      return
+    }
+    if (prevRunning.current === true && !selectedRunning) {
+      refetch()
+    }
+    prevRunning.current = selectedRunning
+  }, [selectedChild, selectedRunning, refetch])
 
   // Keep the newest content in view while a run streams.
   const transcriptRef = useRef<HTMLDivElement | null>(null)

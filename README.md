@@ -51,11 +51,11 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 
 - **列表**：每行显示子代理标题、类型（`/side 可续聊` / `/btw 一次性`）、运行状态（绿点运行中/灰点已结束）；标题行按钮带**运行中数量角标**
 - **嵌入对话**：点击行 → 面板内直接渲染该子代理的对话（`subagent.history` 转录），**主会话视图保持不变**；`/side` 可续聊的子代理底部有**输入框**，Enter 直接继续侧聊（`subagent.prompt`）；`/btw` 一次性子代理显示只读提示
-- **实时性**：子代理运行时，会话快照流驱动转录自动刷新（防抖），侧聊过程实时滚入面板；目录本身也实时订阅
+- **实时性**：子代理运行时按 1.2s 轮询刷新转录尾部页（host 直接读运行中会话的内存快照），侧聊过程近实时滚入面板；结束后自动定格最终结果；目录本身也实时订阅
 - `/side` 或 `/btw` 命令成功后**自动弹出面板并选中新子代理**，立即看到它的对话；不再切换主视图
 - 手动刷新、错误重试、空态提示一应俱全；「返回列表」回到目录
 
-实现说明：面板是插件自带的浮动覆盖层（`position: fixed` 右缘），不修改主仓库布局；成员数据复用运行时的子代理 catalog（`sessions.list.subagentsByParent`），对话内容走 catalog 的 `subagent.history` / `subagent.prompt` RPC（不激活子代理、不改变当前会话）。
+实现说明：面板是插件自带的浮动覆盖层（`position: fixed` 右缘），不修改主仓库布局；成员数据复用运行时的子代理 catalog（`sessions.list.subagentsByParent`），对话内容走 catalog 的 `subagent.history` / `subagent.prompt` RPC。面板**不挂载任何客户端会话**（不调用 `sessions.binding` / 会话订阅）：冷会话在运行时里会丢弃实时事件帧（`acceptLiveEvent` 对未 open 的会话直接返回），订阅拿不到实时数据，且额外实例化会话会干扰运行时的会话 staging——轮询是纯 RPC 消费者，最稳妥。
 
 ## 验证
 

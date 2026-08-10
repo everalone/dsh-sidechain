@@ -8,7 +8,7 @@
  * while the main session keeps running untouched.
  */
 
-import type { ClientContext, SessionId, SessionFace, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -68,9 +68,6 @@ export function apply(ctx: ClientContext): void {
         },
         sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
           return sendPrompt(subagents, address, text)
-        },
-        sessionFace(id: SessionId): SessionFace | undefined {
-          return sessions.binding(id)?.session
         },
         refresh(parentSessionId: SessionId): void {
           void sessions.refreshSubagents(parentSessionId)

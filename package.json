@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-sidechain",
   "description": "DSH side-conversation plugin: /side and /btw start a side conversation in an ephemeral fork of the current session (Codex /side & /btw semantics).",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
