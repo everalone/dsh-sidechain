@@ -20,6 +20,8 @@ DSH 侧会话插件：在**临时 fork** 的独立会话中执行任务——侧
 
 前置：DSH 快照（含 `lib/`）+ `dsh web` 运行中。依赖插件（`dsh-subagent`、`dsh-subagent-fork`、`dsh-commands`）默认 profile 已含，无需额外安装。
 
+> 兼容性：适配 DSH **0810** 快照（客户端插件声明使用 `dsh.client` 字段；0809 及更早的 `dshClient` 字段已不被 0810 读取）。
+
 ```sh
 git clone https://github.com/dsh-external/dsh-sidechain.git
 cd dsh-sidechain && pnpm install
