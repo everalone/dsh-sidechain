@@ -34,7 +34,7 @@ import {
   IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
   IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { MarkdownCodeLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
@@ -42,18 +42,25 @@ import {
   closeSidechainPanel, isSidechainPanelOpen, selectChild, selectedChildId,
   subscribeSidechainPanel, toggleSidechainPanel,
 } from './panel-state.ts'
+import { fileMentionsFor } from './sidechain-file-mentions.ts'
+import { mergeProduced } from './sidechain-view.ts'
 import type { TranscriptRow } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
 export interface SidechainPanelInjected {
   /** Fetch one child's transcript tail page (catalog `subagent.history`). */
-  readTranscript(address: SubagentAddress): Promise<readonly TranscriptRow[] | null>
+  readTranscript(address: SubagentAddress): Promise<{
+    rows: readonly TranscriptRow[]
+    produced: readonly string[]
+  } | null>
   /** Deliver one human message to a continuable child. */
   sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string): Promise<boolean>
   /** Trigger a fresh catalog fetch for the parent session. */
   refresh(parentSessionId: SessionId): void
   /** Arm (true) or disarm (false) the live catalog membership feed. */
   setCatalogOpen(parentSessionId: SessionId, open: boolean): void
+  /** Open an absolute path on the host (workspaces.openPath). */
+  openPath(path: string): void
 }
 
 /** Full props: session standard kit + the inject share + the locale seat. */
@@ -264,10 +271,12 @@ function Row({ row, t, onSelect }: {
 }
 
 /** One transcript row: user prompt, assistant answer, or a tool line. */
-function TranscriptRowView({ row, streaming, codeLabels }: {
+function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
   row: TranscriptRow
   streaming: boolean
   codeLabels: MarkdownCodeLabels | undefined
+  /** File mentions apply to assistant prose only (mirrors the main chat). */
+  fileMentions: MarkdownFileMentions | undefined
 }): JSX.Element {
   if (row.kind === 'user') {
     return (
@@ -282,7 +291,7 @@ function TranscriptRowView({ row, streaming, codeLabels }: {
     return (
       <div style={styles.assistantRow}>
         <div style={styles.assistantText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} />
+          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
         </div>
       </div>
     )
@@ -305,7 +314,7 @@ const LIVE_POLL_INTERVAL_MS = 1200
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSessions, readTranscript, sendPrompt, refresh, setCatalogOpen, t,
+  sessionId, useSessions, readTranscript, sendPrompt, refresh, setCatalogOpen, openPath, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -368,6 +377,14 @@ export function SidechainPanel({
 
   // Transcript fetch state; an epoch guard makes stale responses no-ops.
   const [transcript, setTranscript] = useState<readonly TranscriptRow[] | null>(null)
+  const [produced, setProduced] = useState<readonly string[]>([])
+  // File-mention vocabulary: files the selected child's tool calls produced,
+  // resolved against the child's cwd (the main chat's ui-deliverables policy).
+  const childCwd = selected === undefined ? undefined : summaries[selected]?.cwd
+  const fileMentions = useMemo(
+    () => fileMentionsFor(produced, childCwd, openPath),
+    [produced, childCwd, openPath],
+  )
   const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
   const fetchEpoch = useRef(0)
   const request = useCallback((target: SubagentAddress, showLoading: boolean) => {
@@ -375,7 +392,12 @@ export function SidechainPanel({
     if (showLoading) setTranscriptState('loading')
     void actionsRef.current.readTranscript(target).then((result) => {
       if (epoch !== fetchEpoch.current) return
-      setTranscript(result)
+      setTranscript(result?.rows ?? null)
+      // An initial fetch replaces the vocabulary; later polls union it, so
+      // produced paths whose rows slid out of the tail window keep working.
+      setProduced(previous => showLoading
+        ? (result?.produced ?? [])
+        : mergeProduced(previous, result?.produced ?? []))
       setTranscriptState(result === null ? 'error' : 'ready')
     })
   }, [])
@@ -556,7 +578,13 @@ export function SidechainPanel({
                   <div style={styles.notice}>{t('view.empty')}</div>
                 )}
                 {(transcript ?? []).map(row => (
-                  <TranscriptRowView key={row.seq} row={row} streaming={selectedRunning} codeLabels={codeLabels} />
+                  <TranscriptRowView
+                    key={row.seq}
+                    row={row}
+                    streaming={selectedRunning}
+                    codeLabels={codeLabels}
+                    fileMentions={fileMentions}
+                  />
                 ))}
               </div>
               {address.mode === 'one-shot' ? (

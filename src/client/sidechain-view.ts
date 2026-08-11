@@ -21,6 +21,7 @@
  */
 
 import type { IApiClient } from '@deepseek-ai/dsh-host-apiproxy'
+import type { ToolEventView } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
@@ -139,21 +140,103 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
   return rows
 }
 
+/** One history row as subagent.history returns it (event + host-computed view). */
+export interface TranscriptEntry {
+  event: SessionEvent
+  view?: ToolEventView | undefined
+}
+
+/**
+ * Files the child's tool calls report having created or changed, by render
+ * intent rather than tool name — the same policy as the main chat's
+ * ui-deliverables: a diff card, or a generic card whose `kind` is `edit`
+ * (the shape `str_replace_editor`'s insert presents). Reads, deletes, and
+ * plain terminal runs produce nothing. Paths keep first-seen order and
+ * appear once.
+ * @param entries - history rows (views are re-derived per read by the host).
+ * @returns produced file paths.
+ */
+export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
+  // The same seed cut transcriptRows applies: a fresh child's tail window
+  // contains the inherited parent history, whose write/edit calls would
+  // otherwise leak the PARENT's produced files into this child's vocabulary.
+  const seedEnd = lastSeedEnd(entries.map(entry => entry.event))
+  // Calls whose result failed produced nothing to open (ui-deliverables
+  // policy: failed calls do not count).
+  const failedCallIds = new Set<string>()
+  for (let i = seedEnd + 1; i < entries.length; i++) {
+    const event = entries[i]?.event
+    if (event === undefined || event.type !== 'tool/result') continue
+    const block = event.data.message.content[0]
+    const callId = block?.toolCallId
+    if (callId === undefined) continue
+    if (event.data.error !== undefined || block?.isError === true) failedCallIds.add(callId)
+  }
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (let i = seedEnd + 1; i < entries.length; i++) {
+    const entry = entries[i] as TranscriptEntry
+    const view = entry.view
+    if (view === undefined || view.for !== 'call') continue
+    const call = view.view
+    if (entry.event.type !== 'tool/call' || failedCallIds.has(entry.event.data.callId)) continue
+    const locations = call.card === 'diff'
+      ? call.locations
+      : call.card === 'generic' && call.kind === 'edit'
+        ? call.locations
+        : undefined
+    if (locations === undefined) continue
+    for (const location of locations) {
+      if (seen.has(location.path)) continue
+      seen.add(location.path)
+      paths.push(location.path)
+    }
+  }
+  return paths
+}
+
+/**
+ * Union two produced-file vocabularies, keeping first-seen order. The panel
+ * accumulates across polls: a produced path whose call row slides out of the
+ * 20-message tail window must keep its mentions working.
+ * @param previous - the accumulated vocabulary (may be empty on first fetch).
+ * @param next - the current window's vocabulary.
+ * @returns the union in first-seen order.
+ */
+export function mergeProduced(
+  previous: readonly string[],
+  next: readonly string[],
+): string[] {
+  const seen = new Set(previous)
+  return [...previous, ...next.filter(path => !seen.has(path))]
+}
+
 /**
  * Fetch a child's transcript tail page.
- * @param subagents - the api client's subagents surface.
- * @param address - durable parent/child address.
- * @returns display rows, or null on transport/business failure.
+ *
+ * Reads through `session.history` rather than `subagent.history`: the
+ * subagent path serves history without a presenter scope, so tool events
+ * carry no render views (and no produced-file locations); the session path
+ * resolves the session's preset scope from its log (`presenterScopeFor`),
+ * so views — and thus the produced-file vocabulary — are available even for
+ * cold (finished) children.
+ * @param sessions - the api client's sessions surface.
+ * @param address - durable parent/child address (only the child id is used).
+ * @returns display rows plus the produced-file vocabulary, or null on
+ *   transport/business failure.
  */
 export async function fetchTranscript(
-  subagents: IApiClient['subagents'],
+  sessions: IApiClient['sessions'],
   address: SubagentAddress,
-): Promise<readonly TranscriptRow[] | null> {
+): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
   try {
-    const response = await subagents.history({ ...address, maxMessages: TRANSCRIPT_MAX_MESSAGES })
+    const response = await sessions.history({ sessionId: address.childSessionId, maxMessages: TRANSCRIPT_MAX_MESSAGES })
     if (!response.result.ok) return null
-    const events = response.result.value.events.map(entry => entry.event)
-    return transcriptRows(events)
+    const entries = response.result.value.events
+    return {
+      rows: transcriptRows(entries.map(entry => entry.event)),
+      produced: producedPaths(entries),
+    }
   } catch {
     return null
   }

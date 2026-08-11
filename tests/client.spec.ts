@@ -82,6 +82,7 @@ describe('client apply wiring', () => {
         sendPrompt?: (address: unknown, text: string) => Promise<boolean>
         refresh?: (parentSessionId: string) => void
         setCatalogOpen?: (parentSessionId: string, open: boolean) => void
+        openPath?: (path: string) => void
       }
     }
   }
@@ -97,12 +98,13 @@ describe('client apply wiring', () => {
     const registerLocale = vi.fn()
     const history = vi.fn(() => Promise.resolve({ result: { ok: true, value: { events: [], hasMore: false } } }))
     const prompt = vi.fn(() => Promise.resolve({ result: { ok: true } }))
-    const connection = { api: { subagents: { history, prompt } } }
+    const connection = { api: { sessions: { history }, subagents: { prompt } } }
+    const workspaces = { openPath: vi.fn() }
     const ctx = {
       sessions: { refreshSubagents, setSubagentCatalogOpen, binding: vi.fn(() => undefined) },
       locale: { register: registerLocale },
       effect: (fn: () => void) => { fn() },
-      get: (name: string) => (name === 'connection' ? connection : undefined),
+      get: (name: string) => name === 'connection' ? connection : name === 'workspaces' ? workspaces : undefined,
       slots: {
         register: (options: RegisteredSlot['options'], _component: unknown) => {
           registered.push({ options })
@@ -115,7 +117,7 @@ describe('client apply wiring', () => {
         },
       },
     }
-    return { ctx, registered, history, prompt, refreshSubagents, setSubagentCatalogOpen }
+    return { ctx, registered, history, prompt, refreshSubagents, setSubagentCatalogOpen, workspaces }
   }
 
   it('registers keyed cards and the sidechain panel action', () => {
@@ -165,8 +167,8 @@ describe('client apply wiring', () => {
     const injected = entry.options.inject!('parent-1')
     const address = { parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' }
     const transcript = await injected.readTranscript!(address)
-    expect(history).toHaveBeenCalledWith({ ...address, maxMessages: 20 })
-    expect(transcript).toEqual([])
+    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 20 })
+    expect(transcript).toEqual({ rows: [], produced: [] })
     const accepted = await injected.sendPrompt!(address, '继续')
     expect(prompt).toHaveBeenCalledWith({ ...address, content: [{ type: 'text', text: '继续' }] })
     expect(accepted).toBe(true)

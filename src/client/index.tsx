@@ -8,7 +8,7 @@
  * while the main session keeps running untouched.
  */
 
-import type { ClientContext, SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, IWorkspaces, SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -21,11 +21,12 @@ import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
 
-export const inject = ['slots', 'sessions', 'locale', 'connection']
+export const inject = ['slots', 'sessions', 'locale', 'connection', 'workspaces']
 
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
   const connection = ctx.get('connection') as ConnectionHandle
+  const workspaces = ctx.get('workspaces') as IWorkspaces
   const subagents = connection.api.subagents
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-sidechain: sidechain dictionaries')
   const cardInject = (mode: 'continuable' | 'one-shot') => (_parentSessionId: SessionId): SideCommandCardInjected => ({
@@ -64,7 +65,7 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: (parentSessionId: SessionId): SidechainPanelInjected => ({
         readTranscript(address: SubagentAddress) {
-          return fetchTranscript(subagents, address)
+          return fetchTranscript(connection.api.sessions, address)
         },
         sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
           return sendPrompt(subagents, address, text)
@@ -74,6 +75,10 @@ export function apply(ctx: ClientContext): void {
         },
         setCatalogOpen(parentSessionId: SessionId, open: boolean): void {
           sessions.setSubagentCatalogOpen(parentSessionId, open)
+        },
+        openPath(path: string): void {
+          // Mirror the main chat's openFile: host open failures stay silent.
+          void workspaces.openPath(path).catch(() => {})
         },
       }),
     }, SidechainPanel),

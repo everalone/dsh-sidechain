@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import { blockText, fetchTranscript, sendPrompt, transcriptRows } from '../src/client/sidechain-view'
+import {
+  blockText, fetchTranscript, mergeProduced, producedPaths, sendPrompt, transcriptRows,
+} from '../src/client/sidechain-view'
 
 const CHILD = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914' as SessionId
 const ADDRESS: SubagentAddress = { parentSessionId: 'parent-1' as SessionId, childSessionId: CHILD, mode: 'continuable' }
@@ -116,6 +118,13 @@ describe('transcriptRows', () => {
   })
 })
 
+describe('mergeProduced', () => {
+  it('unions vocabularies in first-seen order, deduped', () => {
+    expect(mergeProduced(['a', 'b'], ['b', 'c'])).toEqual(['a', 'b', 'c'])
+    expect(mergeProduced([], ['a'])).toEqual(['a'])
+  })
+})
+
 describe('fetchTranscript', () => {
   it('maps the history tail page to rows', async () => {
     const history = vi.fn(() => Promise.resolve({
@@ -130,12 +139,15 @@ describe('fetchTranscript', () => {
         },
       },
     }))
-    const rows = await fetchTranscript({ history } as never, ADDRESS)
-    expect(history).toHaveBeenCalledWith({ ...ADDRESS, maxMessages: 20 })
-    expect(rows).toEqual([
-      { kind: 'user', seq: 1, text: '嗨' },
-      { kind: 'assistant', seq: 2, text: '你好' },
-    ])
+    const result = await fetchTranscript({ history } as never, ADDRESS)
+    expect(history).toHaveBeenCalledWith({ sessionId: CHILD, maxMessages: 20 })
+    expect(result).toEqual({
+      rows: [
+        { kind: 'user', seq: 1, text: '嗨' },
+        { kind: 'assistant', seq: 2, text: '你好' },
+      ],
+      produced: [],
+    })
   })
 
   it('returns null on business failure', async () => {
@@ -146,6 +158,25 @@ describe('fetchTranscript', () => {
   it('returns null on transport failure', async () => {
     const history = vi.fn(() => Promise.reject(new Error('network')))
     expect(await fetchTranscript({ history } as never, ADDRESS)).toBeNull()
+  })
+
+  it('extracts the produced-file vocabulary from call views', async () => {
+    const history = vi.fn(() => Promise.resolve({
+      result: {
+        ok: true,
+        value: {
+          events: [
+            { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call', view: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } } },
+          ],
+          hasMore: false,
+        },
+      },
+    }))
+    const result = await fetchTranscript({ history } as never, ADDRESS)
+    expect(result).toEqual({
+      rows: [{ kind: 'tool', seq: 1, name: 'write', failed: false }],
+      produced: ['/w/src/a.ts'],
+    })
   })
 })
 
@@ -163,5 +194,40 @@ describe('sendPrompt', () => {
   it('returns false on rejection', async () => {
     const prompt = vi.fn(() => Promise.resolve({ result: { ok: false, error: { code: 'x', message: 'x' } } }))
     expect(await sendPrompt({ prompt } as never, ADDRESS, '继续')).toBe(false)
+  })
+})
+
+describe('producedPaths', () => {
+  it('collects diff and edit-call locations in first-seen order, deduped', () => {
+    const entries = [
+      { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'Write a', diffs: [], locations: [{ path: 'src/a.ts' }] } } },
+      { event: event('tool/call', 2, { name: 'edit', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Edit', kind: 'edit' as const, locations: [{ path: 'src/b.ts' }, { path: 'src/a.ts' }] } } },
+      { event: event('tool/call', 3, { name: 'read', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Read', kind: 'read' as const, locations: [{ path: 'src/c.ts' }] } } },
+    ]
+    expect(producedPaths(entries)).toEqual(['src/a.ts', 'src/b.ts'])
+  })
+
+  it('cuts the inherited seed and excludes failed calls', () => {
+    const entries = [
+      // Parent seed: a write that must NOT leak into the child vocabulary.
+      { event: event('tool/call', 1, { name: 'write', arguments: '{}', callId: 'p1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'p', diffs: [], locations: [{ path: 'parent-only.ts' }] } } },
+      { event: event('session/end-seed', 2, {}) },
+      // Child write: failed result -> excluded.
+      { event: event('tool/call', 3, { name: 'write', arguments: '{}', callId: 'c1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'failed.ts' }] } } },
+      { event: event('tool/result', 4, { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }, error: { name: 'E', code: 'C' } }) },
+      // Child write: success -> the only produced path.
+      { event: event('tool/call', 5, { name: 'write', arguments: '{}', callId: 'c2' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'made.ts' }] } } },
+      { event: event('tool/result', 6, { message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [] }] } }) },
+    ]
+    expect(producedPaths(entries)).toEqual(['made.ts'])
+  })
+
+  it('ignores result views, missing views, and non-mutation kinds', () => {
+    const entries = [
+      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }), view: { for: 'result' as const, view: { card: 'diff' as const, title: 'x', diffs: [] } } },
+      { event: event('tool/call', 2, { name: 'y', arguments: '{}' }) },
+      { event: event('tool/call', 3, { name: 'z', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'z', kind: 'execute' as const } } },
+    ]
+    expect(producedPaths(entries)).toEqual([])
   })
 })
