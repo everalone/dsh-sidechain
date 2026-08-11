@@ -21,7 +21,7 @@
  */
 
 import type { IApiClient } from '@deepseek-ai/dsh-host-apiproxy'
-import type { ToolEventView } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
@@ -32,10 +32,19 @@ export const TRANSCRIPT_MAX_MESSAGES = 20
 /** One compact transcript row rendered in the panel. `seq` is the source
  *  event's log sequence — stable row identity for React keys across polls
  *  (streaming caches ride the key, so window slides must not re-key rows). */
+/** Detail attached to one tool row: host-computed render views (call +
+ *  result) and the raw arguments, paired by the result's toolCallId. */
+export interface ToolDetail {
+  callView?: ToolCallView | undefined
+  resultView?: ToolResultView | undefined
+  arguments?: string | undefined
+  error?: { name: string; code: string } | undefined
+}
+
 export type TranscriptRow =
   | { kind: 'user'; seq: number; text: string }
   | { kind: 'assistant'; seq: number; text: string }
-  | { kind: 'tool'; seq: number; name: string; failed: boolean }
+  | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
 /** The fork boundary prompt's first line (dropped from the transcript). */
 const BOUNDARY_PREFIX = 'Side conversation boundary'
@@ -64,22 +73,28 @@ function lastSeedEnd(events: readonly SessionEvent[]): number {
 }
 
 /**
- * Map a session log's events onto compact transcript rows: the inherited
- * fork seed is cut at the last `session/end-seed`, the boundary prompt is
- * dropped, `assistant/chunk` text deltas accumulate into a streaming row per
- * step (superseded by the assembled `assistant/message`), and tool
- * invocations render one line each (a failing `tool/result` marks the call).
- * @param events - log events in seq order.
+ * Map a session log's history rows onto compact transcript rows: the
+ * inherited fork seed is cut at the last `session/end-seed`, the boundary
+ * prompt is dropped, `assistant/chunk` text deltas accumulate into a
+ * streaming row per step (superseded by the assembled `assistant/message`),
+ * and tool invocations render one expandable line each — the call's view,
+ * raw arguments, and the paired result's view (matched by the result's
+ * `toolCallId`) ride the row as detail; a failing `tool/result` marks it.
+ * @param entries - history rows (event + host-computed view) in seq order.
  * @returns display rows in log order.
  */
-export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[] {
+export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
+  const events = entries.map(entry => entry.event)
   const seedEnd = lastSeedEnd(events)
   const rows: TranscriptRow[] = []
   /** (turn, step) key → index of its accumulating stream row in `rows`. */
   const streamRows = new Map<string, number>()
+  /** tool callId → index of its tool row in `rows` (result pairing). */
+  const callRows = new Map<string, number>()
   for (let i = 0; i < events.length; i++) {
     if (i <= seedEnd) continue
     const event = events[i] as SessionEvent
+    const view = entries[i]?.view
     switch (event.type) {
       case 'user/message': {
         const text = blockText(event.data.content)
@@ -118,17 +133,49 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
         break
       }
       case 'tool/call': {
-        rows.push({ kind: 'tool', seq: event.seq, name: event.data.name, failed: false })
+        const data = event.data
+        callRows.set(data.callId, rows.length)
+        rows.push({
+          kind: 'tool',
+          seq: event.seq,
+          name: data.name,
+          failed: false,
+          detail: {
+            arguments: data.arguments,
+            ...(view !== undefined && view.for === 'call' ? { callView: view.view } : {}),
+          },
+        })
         break
       }
       case 'tool/result': {
-        if (event.data.error !== undefined) {
-          const last = rows[rows.length - 1]
-          if (last !== undefined && last.kind === 'tool') {
-            rows[rows.length - 1] = { ...last, failed: true }
-          } else {
-            rows.push({ kind: 'tool', seq: event.seq, name: 'tool', failed: true })
+        const data = event.data
+        const resultBlock = data.message.content[0]
+        const callId = resultBlock?.toolCallId
+        const index = callId === undefined ? undefined : callRows.get(callId)
+        const error = data.error
+        // A result is failed on the explicit event error OR the block's own
+        // isError flag (tools report hard failures either way).
+        const failed = error !== undefined || resultBlock?.isError === true
+        if (index !== undefined) {
+          const row = rows[index]
+          if (row !== undefined && row.kind === 'tool') {
+            rows[index] = {
+              ...row,
+              failed,
+              detail: {
+                ...row.detail,
+                ...(view !== undefined && view.for === 'result' ? { resultView: view.view } : {}),
+                ...(error === undefined ? {} : { error }),
+              },
+            }
           }
+        } else if (failed) {
+          // Orphan result (no call row in the window): surface the failure
+          // with its error so the row stays informative and expandable.
+          rows.push({
+            kind: 'tool', seq: event.seq, name: 'tool', failed: true,
+            ...(error === undefined ? {} : { detail: { error } }),
+          })
         }
         break
       }
@@ -195,6 +242,40 @@ export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
   return paths
 }
 
+/** One-line summary of a non-terminal result view, for the expanded tool row. */
+export function resultViewSummary(view: ToolResultView): string | undefined {
+  switch (view.card) {
+    case 'generic': {
+      return view.content === undefined ? undefined : blockText(view.content)
+    }
+    case 'diff': {
+      const paths = view.diffs.map(diff => diff.path)
+      const lines = view.diffs.reduce(
+        (total, diff) => total + diff.newText.split('\n').length + (diff.oldText === null ? 0 : diff.oldText.split('\n').length),
+        0,
+      )
+      return `${paths.join(', ')} · ${lines} 行变更`
+    }
+    case 'read': {
+      if (view.content !== undefined) return blockText(view.content)
+      return `${view.path} · 显示 ${view.lines.length}/${view.totalLines} 行`
+    }
+    case 'search': {
+      if (view.shape === 'paths') return `${view.paths.length} 个路径`
+      const files = view.files.length
+      const matches = view.files.reduce((total, file) => total + file.matches.length, 0)
+      return `${files} 个文件 · ${matches} 处匹配`
+    }
+    case 'web': {
+      if (view.kind === 'search') return `${view.sources.length} 个来源`
+      return `${view.url} · HTTP ${view.statusCode}`
+    }
+    case 'terminal': {
+      return undefined
+    }
+  }
+}
+
 /**
  * Union two produced-file vocabularies, keeping first-seen order. The panel
  * accumulates across polls: a produced path whose call row slides out of the
@@ -234,7 +315,7 @@ export async function fetchTranscript(
     if (!response.result.ok) return null
     const entries = response.result.value.events
     return {
-      rows: transcriptRows(entries.map(entry => entry.event)),
+      rows: transcriptRows(entries),
       produced: producedPaths(entries),
     }
   } catch {

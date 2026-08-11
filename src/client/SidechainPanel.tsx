@@ -31,8 +31,8 @@ import type {
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
-  IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot,
+  DisclosureRow, IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
+  IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -43,8 +43,8 @@ import {
   subscribeSidechainPanel, toggleSidechainPanel,
 } from './panel-state.ts'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
-import { mergeProduced } from './sidechain-view.ts'
-import type { TranscriptRow } from './sidechain-view.ts'
+import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
+import type { TranscriptRow, ToolDetail } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
 export interface SidechainPanelInjected {
@@ -129,6 +129,8 @@ export function diagnosticText(
 }
 
 /** Shared token-level palette (falls back gracefully when the app lacks the variables). */
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+
 const C = {
   text1: 'var(--ds-color-text-1, #1d2129)',
   text2: 'var(--ds-color-text-2, #4e5969)',
@@ -214,6 +216,13 @@ const styles: Record<string, CSSProperties> = {
   },
   toolRow: { color: C.text2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   toolFailed: { color: C.danger },
+  toolDetail: { padding: '4px 0 6px' },
+  toolArgs: {
+    margin: '4px 0', padding: '6px 8px', borderRadius: 6,
+    background: 'var(--ds-color-bg-2, #f2f3f5)', fontFamily: MONO,
+    fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+    maxHeight: 180, overflowY: 'auto',
+  },
   composer: {
     display: 'flex', alignItems: 'center', gap: 8,
     padding: '10px 12px', borderTop: `1px solid ${C.border}`,
@@ -270,19 +279,113 @@ function Row({ row, t, onSelect }: {
   )
 }
 
+/** Cap for raw arguments shown in the detail view (platform contract: never
+ *  dump full raw arguments — write/edit payloads can be hundreds of KB). */
+const TOOL_ARGS_MAX = 2000
+
+/** Pretty-print a tool's curated rawInput (the platform contract's salient
+ *  input), falling back to the raw arguments JSON truncated to a hard cap. */
+function prettyToolInput(rawInput: unknown, argumentsRaw: string | undefined): string | undefined {
+  if (rawInput !== undefined) {
+    try {
+      return JSON.stringify(rawInput, null, 2)
+    } catch {
+      // non-serializable rawInput: fall through to the arguments fallback
+    }
+  }
+  if (argumentsRaw === undefined) return undefined
+  const trimmed = argumentsRaw.length > TOOL_ARGS_MAX
+    ? `${argumentsRaw.slice(0, TOOL_ARGS_MAX)}…（已截断）`
+    : argumentsRaw
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return trimmed
+  }
+}
+
+/** One expandable tool row: collapsed shows the call line; expanded shows
+ *  the terminal-style command/output (terminal calls) or the arguments,
+ *  result text, and failure detail. */
+function ToolRow({ row, running, codeLabels }: {
+  row: Extract<TranscriptRow, { kind: 'tool' }>
+  /** The child session is still running and this call has no result yet. */
+  running: boolean
+  codeLabels: MarkdownCodeLabels | undefined
+}): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const detail: ToolDetail | undefined = row.detail
+  const callView = detail?.callView
+  const resultView = detail?.resultView
+  const terminal = callView?.card === 'terminal' || resultView?.card === 'terminal'
+  const resultText = resultView === undefined || resultView.card === 'terminal'
+    ? undefined
+    : resultViewSummary(resultView)
+  const inputText = prettyToolInput(
+    callView !== undefined && callView.card === 'generic' ? callView.rawInput : undefined,
+    detail?.arguments,
+  )
+  const expandable = detail !== undefined && (
+    terminal
+    || inputText !== undefined
+    || resultText !== undefined
+    || detail.error !== undefined
+  )
+  const title = callView !== undefined && callView.card !== 'terminal' ? callView.title : row.name
+  return (
+    <DisclosureRow
+      icon={<StateDot state={row.failed ? 'error' : running ? 'ongoing' : 'done'} />}
+      title={`🔧 ${title}`}
+      open={open}
+      expandable={expandable}
+      onToggle={() => { setOpen(value => !value) }}
+      collapsedContent={row.failed ? ' ✗' : undefined}
+    >
+      <div style={styles.toolDetail}>
+        {terminal && callView?.card === 'terminal' ? (
+          <TerminalBlock
+            command={callView.title}
+            cwd={callView.cwd}
+            output={resultView !== undefined && resultView.card === 'terminal' ? resultView.output : undefined}
+            exitCode={resultView !== undefined && resultView.card === 'terminal' ? resultView.exitCode : undefined}
+            signal={resultView !== undefined && resultView.card === 'terminal' ? resultView.signal : undefined}
+            running={running}
+            maxLines={24}
+          />
+        ) : (
+          <>
+            {inputText !== undefined && (
+              <pre style={styles.toolArgs}>{inputText}</pre>
+            )}
+            {resultText !== undefined && (
+              <div style={{ margin: '4px 0' }}>
+                <MarkdownText text={resultText} streaming={false} codeLabels={codeLabels} />
+              </div>
+            )}
+          </>
+        )}
+        {detail?.error !== undefined && (
+          <div style={{ ...styles.toolFailed, fontSize: 12, marginTop: 4 }}>
+            {`✗ ${detail.error.name}: ${detail.error.code}`}
+          </div>
+        )}
+      </div>
+    </DisclosureRow>
+  )
+}
+
 /** One transcript row: user prompt, assistant answer, or a tool line. */
 function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
   row: TranscriptRow
   streaming: boolean
   codeLabels: MarkdownCodeLabels | undefined
-  /** File mentions apply to assistant prose only (mirrors the main chat). */
   fileMentions: MarkdownFileMentions | undefined
 }): JSX.Element {
   if (row.kind === 'user') {
     return (
       <div style={styles.userRow}>
         <div style={styles.userText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} />
+          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
         </div>
       </div>
     )
@@ -296,11 +399,7 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
       </div>
     )
   }
-  return (
-    <div style={{ ...styles.toolRow, ...(row.failed ? styles.toolFailed : {}) }}>
-      {`🔧 ${row.name}${row.failed ? ' ✗' : ''}`}
-    </div>
-  )
+  return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
 }
 
 /** Poll interval for the selected child's transcript while it is running (ms). */

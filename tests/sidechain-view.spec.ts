@@ -1,21 +1,28 @@
 /**
  * Unit tests for the embedded side-conversation transcript model: event →
- * row mapping and the history/prompt RPC helpers.
+ * row mapping, tool call/result pairing, and the history/prompt RPC helpers.
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 import {
-  blockText, fetchTranscript, mergeProduced, producedPaths, sendPrompt, transcriptRows,
+  blockText, fetchTranscript, mergeProduced, producedPaths, resultViewSummary, sendPrompt, transcriptRows,
 } from '../src/client/sidechain-view'
+import type { TranscriptEntry } from '../src/client/sidechain-view'
+
+import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 
 const CHILD = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914' as SessionId
 const ADDRESS: SubagentAddress = { parentSessionId: 'parent-1' as SessionId, childSessionId: CHILD, mode: 'continuable' }
 
 function event(type: SessionEvent['type'], seq: number, data: Record<string, unknown>): SessionEvent {
   return { type, seq, time: 0, data } as SessionEvent
+}
+
+/** Wrap events into history rows (views absent unless provided). */
+function ent(...events: SessionEvent[]): TranscriptEntry[] {
+  return events.map(event => ({ event }))
 }
 
 describe('blockText', () => {
@@ -35,44 +42,86 @@ describe('blockText', () => {
 
 describe('transcriptRows', () => {
   it('maps user prompts, assistant answers, and tool calls in order', () => {
-    const rows = transcriptRows([
+    const rows = transcriptRows(ent(
       event('user/message', 1, { content: [{ type: 'text', text: '查一下' }] }),
       event('tool/call', 2, { name: 'grep', arguments: '{}' }),
       event('tool/result', 3, { message: { content: [] } }),
       event('assistant/message', 4, { message: { content: [{ type: 'text', text: '结果如下' }] } }),
-    ])
+    ))
     expect(rows).toEqual([
       { kind: 'user', seq: 1, text: '查一下' },
-      { kind: 'tool', seq: 2, name: 'grep', failed: false },
+      { kind: 'tool', seq: 2, name: 'grep', failed: false, detail: { arguments: '{}' } },
       { kind: 'assistant', seq: 4, text: '结果如下' },
     ])
   })
 
-  it('folds a failing tool/result onto its call row', () => {
-    const rows = transcriptRows([
-      event('tool/call', 1, { name: 'grep', arguments: '{}' }),
-      event('tool/result', 2, { message: { content: [] }, error: { name: 'E', code: 'C' } }),
-    ])
-    expect(rows).toEqual([{ kind: 'tool', seq: 1, name: 'grep', failed: true }])
+  it('pairs a failing tool/result onto its call row by toolCallId', () => {
+    const rows = transcriptRows(ent(
+      event('tool/call', 1, { name: 'grep', arguments: '{}', callId: 'c1' }),
+      event('tool/result', 2, {
+        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] },
+        error: { name: 'E', code: 'C' },
+      }),
+    ))
+    expect(rows).toEqual([{
+      kind: 'tool', seq: 1, name: 'grep', failed: true,
+      detail: { arguments: '{}', error: { name: 'E', code: 'C' } },
+    }])
   })
 
-  it('skips log detail events (chunks, turn brackets, projections)', () => {
+  it('marks a result failed on the block isError flag', () => {
+    const rows = transcriptRows(ent(
+      event('tool/call', 1, { name: 'edit', arguments: '{}', callId: 'c1' }),
+      event('tool/result', 2, {
+        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: true }] },
+      }),
+    ))
+    expect(rows[0]).toMatchObject({ kind: 'tool', failed: true })
+  })
+
+  it('keeps the error on orphan failed rows (expandable detail)', () => {
+    const rows = transcriptRows(ent(
+      event('tool/result', 1, {
+        message: { content: [{ type: 'tool-result', toolCallId: 'c9', content: [] }] },
+        error: { name: 'E', code: 'C' },
+      }),
+    ))
+    expect(rows).toEqual([{
+      kind: 'tool', seq: 1, name: 'tool', failed: true,
+      detail: { error: { name: 'E', code: 'C' } },
+    }])
+  })
+
+  it('attaches the call and result views to the paired row', () => {
     const rows = transcriptRows([
-      event('turn/start', 1, { turn: 1 }),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'usage', usage: {} } }),
-      event('turn/end', 3, { turn: 1, reason: 'stop' }),
-      event('session/end-seed', 4, {}),
+      {
+        event: event('tool/call', 1, { name: 'bash', arguments: '{}', callId: 'c1' }),
+        view: { for: 'call', view: { card: 'terminal', title: 'ls' } },
+      },
+      {
+        event: event('tool/result', 2, {
+          message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] },
+        }),
+        view: { for: 'result', view: { card: 'terminal', title: 'ls', output: 'src\n', exitCode: 0 } },
+      },
     ])
-    expect(rows).toEqual([])
+    expect(rows).toEqual([{
+      kind: 'tool', seq: 1, name: 'bash', failed: false,
+      detail: {
+        arguments: '{}',
+        callView: { card: 'terminal', title: 'ls' },
+        resultView: { card: 'terminal', title: 'ls', output: 'src\n', exitCode: 0 },
+      },
+    }])
   })
 
   it('cuts the inherited fork seed at the last session/end-seed', () => {
-    const rows = transcriptRows([
+    const rows = transcriptRows(ent(
       event('user/message', 1, { content: [{ type: 'text', text: '父会话的历史提问' }] }),
       event('session/end-seed', 2, {}),
       event('user/message', 3, { content: [{ type: 'text', text: '侧链提问' }] }),
       event('assistant/message', 4, { message: { content: [{ type: 'text', text: '侧链回答' }] } }),
-    ])
+    ))
     expect(rows).toEqual([
       { kind: 'user', seq: 3, text: '侧链提问' },
       { kind: 'assistant', seq: 4, text: '侧链回答' },
@@ -80,41 +129,104 @@ describe('transcriptRows', () => {
   })
 
   it('drops the fork boundary prompt row', () => {
-    const rows = transcriptRows([
+    const rows = transcriptRows(ent(
       event('session/end-seed', 1, {}),
       event('user/message', 2, {
         content: [{ type: 'text', text: 'Side conversation boundary.\n\nEverything before this boundary is reference context only.' }],
       }),
       event('assistant/message', 3, { message: { content: [{ type: 'text', text: '好的' }] } }),
-    ])
+    ))
     expect(rows).toEqual([{ kind: 'assistant', seq: 3, text: '好的' }])
   })
 
   it('accumulates text-delta chunks into a streaming row and supersedes it with the assembled message', () => {
-    const stream = transcriptRows([
+    const stream = transcriptRows(ent(
       event('session/end-seed', 1, {}),
       event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
       event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
-    ])
+    ))
     expect(stream).toEqual([{ kind: 'assistant', seq: 2, text: '你好，世界' }])
-    const settled = transcriptRows([
+    const settled = transcriptRows(ent(
       event('session/end-seed', 1, {}),
       event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
       event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
       event('assistant/message', 4, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '你好，世界！' }] } }),
-    ])
+    ))
     expect(settled).toEqual([{ kind: 'assistant', seq: 4, text: '你好，世界！' }])
   })
 
   it('ignores reasoning deltas and non-text chunks', () => {
-    const rows = transcriptRows([
+    const rows = transcriptRows(ent(
       event('session/end-seed', 1, {}),
       event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '思考中' } }),
       event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'tool-call-delta', index: 0, id: 'c1', argumentsDelta: '{}' } }),
       event('assistant/chunk', 4, { turn: 1, step: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } }),
       event('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '最终答案' }] } }),
-    ])
+    ))
     expect(rows).toEqual([{ kind: 'assistant', seq: 5, text: '最终答案' }])
+  })
+
+  it('skips log detail events (turn brackets, usage chunks, projections)', () => {
+    const rows = transcriptRows(ent(
+      event('turn/start', 1, { turn: 1 }),
+      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'usage', usage: {} } }),
+      event('turn/end', 3, { turn: 1, reason: 'stop' }),
+      event('session/end-seed', 4, {}),
+    ))
+    expect(rows).toEqual([])
+  })
+})
+
+describe('resultViewSummary', () => {
+  it('summarizes diff, read, search, and web views', () => {
+    expect(resultViewSummary({ card: 'diff', diffs: [{ path: 'a.ts', oldText: 'x', newText: 'y\nz' }] }))
+      .toBe('a.ts · 3 行变更')
+    expect(resultViewSummary({ card: 'read', path: 'a.ts', offset: 1, lines: [{ number: 1, text: 'x' }], totalLines: 10 }))
+      .toBe('a.ts · 显示 1/10 行')
+    expect(resultViewSummary({ card: 'search', shape: 'paths', truncated: false, total: 2, paths: ['a.ts', 'b.ts'] }))
+      .toBe('2 个路径')
+    expect(resultViewSummary({
+      card: 'search', shape: 'matches', truncated: false, total: 1,
+      files: [{ path: 'a.ts', matches: [{ lineNumber: 1, line: 'x' }] }],
+    })).toBe('1 个文件 · 1 处匹配')
+    expect(resultViewSummary({ card: 'web', kind: 'search', sources: [{ url: 'https://x' }], truncated: false }))
+      .toBe('1 个来源')
+    expect(resultViewSummary({ card: 'web', kind: 'fetch', url: 'https://x', statusCode: 200, truncated: false }))
+      .toBe('https://x · HTTP 200')
+    expect(resultViewSummary({ card: 'generic', content: [{ type: 'text', text: '结果' }] })).toBe('结果')
+    expect(resultViewSummary({ card: 'terminal', output: 'x' })).toBeUndefined()
+  })
+})
+
+describe('producedPaths', () => {
+  it('collects diff and edit-call locations in first-seen order, deduped', () => {
+    const entries = [
+      { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'Write a', diffs: [], locations: [{ path: 'src/a.ts' }] } } },
+      { event: event('tool/call', 2, { name: 'edit', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Edit', kind: 'edit' as const, locations: [{ path: 'src/b.ts' }, { path: 'src/a.ts' }] } } },
+      { event: event('tool/call', 3, { name: 'read', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Read', kind: 'read' as const, locations: [{ path: 'src/c.ts' }] } } },
+    ]
+    expect(producedPaths(entries)).toEqual(['src/a.ts', 'src/b.ts'])
+  })
+
+  it('cuts the inherited seed and excludes failed calls', () => {
+    const entries = [
+      { event: event('tool/call', 1, { name: 'write', arguments: '{}', callId: 'p1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'p', diffs: [], locations: [{ path: 'parent-only.ts' }] } } },
+      { event: event('session/end-seed', 2, {}) },
+      { event: event('tool/call', 3, { name: 'write', arguments: '{}', callId: 'c1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'failed.ts' }] } } },
+      { event: event('tool/result', 4, { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }, error: { name: 'E', code: 'C' } }) },
+      { event: event('tool/call', 5, { name: 'write', arguments: '{}', callId: 'c2' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'made.ts' }] } } },
+      { event: event('tool/result', 6, { message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [] }] } }) },
+    ]
+    expect(producedPaths(entries)).toEqual(['made.ts'])
+  })
+
+  it('ignores result views, missing views, and non-mutation kinds', () => {
+    const entries = [
+      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }), view: { for: 'result' as const, view: { card: 'diff' as const, title: 'x', diffs: [] } } },
+      { event: event('tool/call', 2, { name: 'y', arguments: '{}' }) },
+      { event: event('tool/call', 3, { name: 'z', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'z', kind: 'execute' as const } } },
+    ]
+    expect(producedPaths(entries)).toEqual([])
   })
 })
 
@@ -126,7 +238,7 @@ describe('mergeProduced', () => {
 })
 
 describe('fetchTranscript', () => {
-  it('maps the history tail page to rows', async () => {
+  it('maps the history tail page to rows via session.history', async () => {
     const history = vi.fn(() => Promise.resolve({
       result: {
         ok: true,
@@ -150,6 +262,31 @@ describe('fetchTranscript', () => {
     })
   })
 
+  it('extracts the produced-file vocabulary from call views', async () => {
+    const history = vi.fn(() => Promise.resolve({
+      result: {
+        ok: true,
+        value: {
+          events: [
+            {
+              event: event('tool/call', 1, { name: 'write', arguments: '{}' }),
+              view: { for: 'call', view: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } },
+            },
+          ],
+          hasMore: false,
+        },
+      },
+    }))
+    const result = await fetchTranscript({ history } as never, ADDRESS)
+    expect(result).toEqual({
+      rows: [{
+        kind: 'tool', seq: 1, name: 'write', failed: false,
+        detail: { arguments: '{}', callView: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } },
+      }],
+      produced: ['/w/src/a.ts'],
+    })
+  })
+
   it('returns null on business failure', async () => {
     const history = vi.fn(() => Promise.resolve({ result: { ok: false, error: { code: 'x', message: 'x' } } }))
     expect(await fetchTranscript({ history } as never, ADDRESS)).toBeNull()
@@ -158,25 +295,6 @@ describe('fetchTranscript', () => {
   it('returns null on transport failure', async () => {
     const history = vi.fn(() => Promise.reject(new Error('network')))
     expect(await fetchTranscript({ history } as never, ADDRESS)).toBeNull()
-  })
-
-  it('extracts the produced-file vocabulary from call views', async () => {
-    const history = vi.fn(() => Promise.resolve({
-      result: {
-        ok: true,
-        value: {
-          events: [
-            { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call', view: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } } },
-          ],
-          hasMore: false,
-        },
-      },
-    }))
-    const result = await fetchTranscript({ history } as never, ADDRESS)
-    expect(result).toEqual({
-      rows: [{ kind: 'tool', seq: 1, name: 'write', failed: false }],
-      produced: ['/w/src/a.ts'],
-    })
   })
 })
 
@@ -194,40 +312,5 @@ describe('sendPrompt', () => {
   it('returns false on rejection', async () => {
     const prompt = vi.fn(() => Promise.resolve({ result: { ok: false, error: { code: 'x', message: 'x' } } }))
     expect(await sendPrompt({ prompt } as never, ADDRESS, '继续')).toBe(false)
-  })
-})
-
-describe('producedPaths', () => {
-  it('collects diff and edit-call locations in first-seen order, deduped', () => {
-    const entries = [
-      { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'Write a', diffs: [], locations: [{ path: 'src/a.ts' }] } } },
-      { event: event('tool/call', 2, { name: 'edit', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Edit', kind: 'edit' as const, locations: [{ path: 'src/b.ts' }, { path: 'src/a.ts' }] } } },
-      { event: event('tool/call', 3, { name: 'read', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Read', kind: 'read' as const, locations: [{ path: 'src/c.ts' }] } } },
-    ]
-    expect(producedPaths(entries)).toEqual(['src/a.ts', 'src/b.ts'])
-  })
-
-  it('cuts the inherited seed and excludes failed calls', () => {
-    const entries = [
-      // Parent seed: a write that must NOT leak into the child vocabulary.
-      { event: event('tool/call', 1, { name: 'write', arguments: '{}', callId: 'p1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'p', diffs: [], locations: [{ path: 'parent-only.ts' }] } } },
-      { event: event('session/end-seed', 2, {}) },
-      // Child write: failed result -> excluded.
-      { event: event('tool/call', 3, { name: 'write', arguments: '{}', callId: 'c1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'failed.ts' }] } } },
-      { event: event('tool/result', 4, { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }, error: { name: 'E', code: 'C' } }) },
-      // Child write: success -> the only produced path.
-      { event: event('tool/call', 5, { name: 'write', arguments: '{}', callId: 'c2' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'made.ts' }] } } },
-      { event: event('tool/result', 6, { message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [] }] } }) },
-    ]
-    expect(producedPaths(entries)).toEqual(['made.ts'])
-  })
-
-  it('ignores result views, missing views, and non-mutation kinds', () => {
-    const entries = [
-      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }), view: { for: 'result' as const, view: { card: 'diff' as const, title: 'x', diffs: [] } } },
-      { event: event('tool/call', 2, { name: 'y', arguments: '{}' }) },
-      { event: event('tool/call', 3, { name: 'z', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'z', kind: 'execute' as const } } },
-    ]
-    expect(producedPaths(entries)).toEqual([])
   })
 })
