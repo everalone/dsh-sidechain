@@ -304,6 +304,12 @@ function prettyToolInput(rawInput: unknown, argumentsRaw: string | undefined): s
   }
 }
 
+/** Platform convention: decorative animations yield to prefers-reduced-motion
+ *  (the plugin bundle has no CSS pipeline, so the guard is a JS matchMedia). */
+function prefersReducedMotion(): boolean {
+  return typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
 /** One expandable tool row: collapsed shows the call line; expanded shows
  *  the terminal-style command/output (terminal calls) or the arguments,
  *  result text, and failure detail. */
@@ -521,19 +527,33 @@ export function SidechainPanel({
     return () => { clearInterval(timer) }
   }, [request])
 
-  // One final refresh when the selected child transitions running → inactive
-  // (the catalog activity flip), so the settled transcript lands exactly.
-  const prevRunning = useRef<boolean | undefined>(undefined)
+  // On the running → inactive transition (the catalog activity flip): pull
+  // the settled transcript exactly, and mark the finalize swap — the rows
+  // switch from streaming to settled rendering (syntax highlighting, KaTeX,
+  // file mentions land) — with a brief fade via the Web Animations API.
+  // The guard records the child identity: switching to another child must
+  // reset it, so a long-finished child never replays the previous child's
+  // settle transition.
+  const settleGuard = useRef<{ id: SessionId | undefined; running: boolean } | undefined>(undefined)
   useEffect(() => {
     if (selectedChild === undefined) {
-      prevRunning.current = undefined
+      settleGuard.current = undefined
       return
     }
-    if (prevRunning.current === true && !selectedRunning) {
+    const previous = settleGuard.current
+    settleGuard.current = { id: selectedChild.id, running: selectedRunning }
+    if (previous === undefined || previous.id !== selectedChild.id) return
+    if (previous.running === true && !selectedRunning) {
       const target = addressRef.current
       if (target !== undefined) request(target, false)
+      const el = transcriptRef.current
+      if (el !== null && !prefersReducedMotion()) {
+        el.animate(
+          [{ opacity: 0.7 }, { opacity: 1 }],
+          { duration: 260, easing: 'ease-out' },
+        )
+      }
     }
-    prevRunning.current = selectedRunning
   }, [selectedChild, selectedRunning, request])
 
   // Keep the newest content in view while a run streams — but only when the
