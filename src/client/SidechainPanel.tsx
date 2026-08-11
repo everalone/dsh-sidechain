@@ -32,8 +32,9 @@ import type {
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
   IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
-  IconRefreshOutline14, IconRightUpOutline14, StateDot,
+  IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownCodeLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
@@ -194,15 +195,15 @@ const styles: Record<string, CSSProperties> = {
   transcript: { flex: 1, overflowY: 'auto', padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 },
   userRow: { alignSelf: 'flex-start', maxWidth: '100%' },
   userText: {
-    display: 'inline-block', padding: '6px 10px', borderRadius: 10,
+    padding: '6px 10px', borderRadius: 10,
     background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text1,
-    whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13, lineHeight: 1.5,
+    width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
   },
   assistantRow: { alignSelf: 'flex-start', maxWidth: '100%' },
   assistantText: {
-    display: 'inline-block', padding: '6px 10px', borderRadius: 10,
+    padding: '6px 10px', borderRadius: 10,
     background: 'var(--ds-color-surface-2, #eef2ff)', color: C.text1,
-    whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13, lineHeight: 1.5,
+    width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
   },
   toolRow: { color: C.text2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   toolFailed: { color: C.danger },
@@ -263,18 +264,26 @@ function Row({ row, t, onSelect }: {
 }
 
 /** One transcript row: user prompt, assistant answer, or a tool line. */
-function TranscriptRowView({ row, t }: { row: TranscriptRow; t: SidechainPanelProps['t'] }): JSX.Element {
+function TranscriptRowView({ row, streaming, codeLabels }: {
+  row: TranscriptRow
+  streaming: boolean
+  codeLabels: MarkdownCodeLabels | undefined
+}): JSX.Element {
   if (row.kind === 'user') {
     return (
       <div style={styles.userRow}>
-        <span style={styles.userText}>{row.text}</span>
+        <div style={styles.userText}>
+          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} />
+        </div>
       </div>
     )
   }
   if (row.kind === 'assistant') {
     return (
       <div style={styles.assistantRow}>
-        <span style={styles.assistantText}>{row.text}</span>
+        <div style={styles.assistantText}>
+          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} />
+        </div>
       </div>
     )
   }
@@ -310,6 +319,9 @@ export function SidechainPanel({
   const catalog = catalogs[sessionId]
   const rows = useMemo(() => sidechainRows(catalog, summaries), [catalog, summaries])
   const running = runningCount(rows)
+  // Stable reference: MarkdownText bakes codeLabels into its streaming cache
+  // and discards the cache when the reference changes (see its module doc).
+  const codeLabels = useMemo(() => ({ copyLabel: t('code.copy'), copiedLabel: t('code.copied') }), [t])
 
   // The injected actions can be recreated per render; keep effects pinned to
   // stable keys, reading the latest actions through a ref.
@@ -543,8 +555,8 @@ export function SidechainPanel({
                 {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
                   <div style={styles.notice}>{t('view.empty')}</div>
                 )}
-                {(transcript ?? []).map((row, index) => (
-                  <TranscriptRowView key={index} row={row} t={t} />
+                {(transcript ?? []).map(row => (
+                  <TranscriptRowView key={row.seq} row={row} streaming={selectedRunning} codeLabels={codeLabels} />
                 ))}
               </div>
               {address.mode === 'one-shot' ? (

@@ -28,11 +28,13 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 /** Tail-page size for one transcript fetch (messages, not raw events). */
 export const TRANSCRIPT_MAX_MESSAGES = 20
 
-/** One compact transcript row rendered in the panel. */
+/** One compact transcript row rendered in the panel. `seq` is the source
+ *  event's log sequence — stable row identity for React keys across polls
+ *  (streaming caches ride the key, so window slides must not re-key rows). */
 export type TranscriptRow =
-  | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; failed: boolean }
+  | { kind: 'user'; seq: number; text: string }
+  | { kind: 'assistant'; seq: number; text: string }
+  | { kind: 'tool'; seq: number; name: string; failed: boolean }
 
 /** The fork boundary prompt's first line (dropped from the transcript). */
 const BOUNDARY_PREFIX = 'Side conversation boundary'
@@ -81,7 +83,7 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
       case 'user/message': {
         const text = blockText(event.data.content)
         if (text.startsWith(BOUNDARY_PREFIX)) break
-        rows.push({ kind: 'user', text })
+        rows.push({ kind: 'user', seq: event.seq, text })
         break
       }
       case 'assistant/chunk': {
@@ -96,7 +98,7 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
           }
         } else {
           streamRows.set(key, rows.length)
-          rows.push({ kind: 'assistant', text: chunk.text })
+          rows.push({ kind: 'assistant', seq: event.seq, text: chunk.text })
         }
         break
       }
@@ -105,16 +107,17 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
         const existing = streamRows.get(key)
         const text = blockText(event.data.message.content)
         if (existing !== undefined) {
-          // Supersede the accumulated stream with the assembled message.
+          // Supersede the accumulated stream with the assembled message
+          // (same step key, but the message seq becomes the stable identity).
           streamRows.delete(key)
-          rows[existing] = { kind: 'assistant', text }
+          rows[existing] = { kind: 'assistant', seq: event.seq, text }
         } else {
-          rows.push({ kind: 'assistant', text })
+          rows.push({ kind: 'assistant', seq: event.seq, text })
         }
         break
       }
       case 'tool/call': {
-        rows.push({ kind: 'tool', name: event.data.name, failed: false })
+        rows.push({ kind: 'tool', seq: event.seq, name: event.data.name, failed: false })
         break
       }
       case 'tool/result': {
@@ -123,7 +126,7 @@ export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[]
           if (last !== undefined && last.kind === 'tool') {
             rows[rows.length - 1] = { ...last, failed: true }
           } else {
-            rows.push({ kind: 'tool', name: 'tool', failed: true })
+            rows.push({ kind: 'tool', seq: event.seq, name: 'tool', failed: true })
           }
         }
         break

@@ -10,6 +10,7 @@
 
 import { useEffect, useRef } from 'react'
 import type { CommandNode, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Business face injected by the slot registration (per session scope). */
 export interface SideCommandCardInjected {
@@ -82,14 +83,11 @@ export function SideCommandCard({ node, revealPanel }: SideCommandCardProps): JS
   const label = outcome === null
     ? '…'
     : outcome.kind === 'error'
-      ? outcome.text
-      : outcome.text ?? `/${kind}`
+      ? (outcome.text ?? '')
+      : (outcome.text ?? `/${kind}`)
   return (
     <div
       style={{
-        display: 'flex',
-        gap: '8px',
-        alignItems: 'baseline',
         padding: '6px 10px',
         borderRadius: '8px',
         background: 'var(--ds-color-surface-2, #f2f3f5)',
@@ -97,8 +95,11 @@ export function SideCommandCard({ node, revealPanel }: SideCommandCardProps): JS
         lineHeight: '1.5',
       }}
     >
-      <strong style={{ whiteSpace: 'nowrap' }}>/{node.name ?? kind}</strong>
-      <span style={{ overflowWrap: 'anywhere' }}>{label}</span>
+      <strong style={{ whiteSpace: 'nowrap', display: 'block', marginBottom: '2px' }}>/{node.name ?? kind}</strong>
+      {/* The /btw answer and /side notice render as markdown (tables, code, lists). */}
+      <div style={{ overflowX: 'auto' }}>
+        <MarkdownText text={label} streaming={false} />
+      </div>
     </div>
   )
 }

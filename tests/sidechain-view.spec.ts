@@ -40,9 +40,9 @@ describe('transcriptRows', () => {
       event('assistant/message', 4, { message: { content: [{ type: 'text', text: '结果如下' }] } }),
     ])
     expect(rows).toEqual([
-      { kind: 'user', text: '查一下' },
-      { kind: 'tool', name: 'grep', failed: false },
-      { kind: 'assistant', text: '结果如下' },
+      { kind: 'user', seq: 1, text: '查一下' },
+      { kind: 'tool', seq: 2, name: 'grep', failed: false },
+      { kind: 'assistant', seq: 4, text: '结果如下' },
     ])
   })
 
@@ -51,7 +51,7 @@ describe('transcriptRows', () => {
       event('tool/call', 1, { name: 'grep', arguments: '{}' }),
       event('tool/result', 2, { message: { content: [] }, error: { name: 'E', code: 'C' } }),
     ])
-    expect(rows).toEqual([{ kind: 'tool', name: 'grep', failed: true }])
+    expect(rows).toEqual([{ kind: 'tool', seq: 1, name: 'grep', failed: true }])
   })
 
   it('skips log detail events (chunks, turn brackets, projections)', () => {
@@ -72,8 +72,8 @@ describe('transcriptRows', () => {
       event('assistant/message', 4, { message: { content: [{ type: 'text', text: '侧链回答' }] } }),
     ])
     expect(rows).toEqual([
-      { kind: 'user', text: '侧链提问' },
-      { kind: 'assistant', text: '侧链回答' },
+      { kind: 'user', seq: 3, text: '侧链提问' },
+      { kind: 'assistant', seq: 4, text: '侧链回答' },
     ])
   })
 
@@ -85,7 +85,7 @@ describe('transcriptRows', () => {
       }),
       event('assistant/message', 3, { message: { content: [{ type: 'text', text: '好的' }] } }),
     ])
-    expect(rows).toEqual([{ kind: 'assistant', text: '好的' }])
+    expect(rows).toEqual([{ kind: 'assistant', seq: 3, text: '好的' }])
   })
 
   it('accumulates text-delta chunks into a streaming row and supersedes it with the assembled message', () => {
@@ -94,14 +94,14 @@ describe('transcriptRows', () => {
       event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
       event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
     ])
-    expect(stream).toEqual([{ kind: 'assistant', text: '你好，世界' }])
+    expect(stream).toEqual([{ kind: 'assistant', seq: 2, text: '你好，世界' }])
     const settled = transcriptRows([
       event('session/end-seed', 1, {}),
       event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
       event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
       event('assistant/message', 4, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '你好，世界！' }] } }),
     ])
-    expect(settled).toEqual([{ kind: 'assistant', text: '你好，世界！' }])
+    expect(settled).toEqual([{ kind: 'assistant', seq: 4, text: '你好，世界！' }])
   })
 
   it('ignores reasoning deltas and non-text chunks', () => {
@@ -112,7 +112,7 @@ describe('transcriptRows', () => {
       event('assistant/chunk', 4, { turn: 1, step: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } }),
       event('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '最终答案' }] } }),
     ])
-    expect(rows).toEqual([{ kind: 'assistant', text: '最终答案' }])
+    expect(rows).toEqual([{ kind: 'assistant', seq: 5, text: '最终答案' }])
   })
 })
 
@@ -133,8 +133,8 @@ describe('fetchTranscript', () => {
     const rows = await fetchTranscript({ history } as never, ADDRESS)
     expect(history).toHaveBeenCalledWith({ ...ADDRESS, maxMessages: 20 })
     expect(rows).toEqual([
-      { kind: 'user', text: '嗨' },
-      { kind: 'assistant', text: '你好' },
+      { kind: 'user', seq: 1, text: '嗨' },
+      { kind: 'assistant', seq: 2, text: '你好' },
     ])
   })
 
