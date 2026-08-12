@@ -50,13 +50,13 @@ export function shouldAutoJump(first: FirstOutcome | null, outcome: CommandNode[
  * Resolve the created child session id from a settled command node, or
  * undefined while the command is running, failed, or the id is absent.
  * The host pins the id in a stable marker: `/side` texts start with
- * `Side conversation started: <uuid>.`, `/btw` answers end with
- * `(btw session: <uuid>)`.
+ * `Side conversation started: <uuid>.`, `/btw` texts with
+ * `BTW question started: <uuid>.`.
  */
 export function resolveChildSessionId(node: CommandNode, kind: SideCommandKind): SessionId | undefined {
   const text = node.outcome?.kind === 'success' ? node.outcome.text : undefined
   if (text === undefined) return undefined
-  const pattern = kind === 'side' ? /started: ([0-9a-f-]{36})/ : /btw session: ([0-9a-f-]{36})/
+  const pattern = kind === 'side' ? /Side conversation started: ([0-9a-f-]{36})/ : /BTW question started: ([0-9a-f-]{36})/
   return pattern.exec(text)?.[1] as SessionId | undefined
 }
 

@@ -1,16 +1,15 @@
 /**
  * Command definitions for `/side` and `/btw` (Codex semantics: both start a
- * side conversation in an ephemeral fork of the current session).
+ * side conversation in an ephemeral fork of the current session). Neither
+ * command blocks the main session: the child runs in the background and its
+ * transcript streams into the sidechain panel.
  */
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
-import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
 import {
   askSideOneShot,
   formatSideList,
-  renderResultText,
   startSideConversation,
-  truncateText,
   type SideDeps,
   type SubagentsLike,
 } from './side.ts'
@@ -19,8 +18,6 @@ import {
 export function createSidechainCommands(
   subagents: SubagentsLike,
   deps: SideDeps,
-  maxResultChars: number,
-  btwTimeoutMs: number,
 ): CommandDefinition[] {
   /** Loud hint when the configured provider is absent from the deployment. */
   const missingProvider = (): string | undefined => {
@@ -64,36 +61,15 @@ export function createSidechainCommands(
         }
         const missing = missingProvider()
         if (missing !== undefined) return { kind: 'error', text: missing }
-        let run: SubagentRun | undefined
-        let timer: ReturnType<typeof setTimeout> | undefined
         try {
-          run = await askSideOneShot(subagents, agent, question, deps, signal)
-          // Bounded side question: a never-settling child (e.g. a long tool
-          // call) must not hold the parent session forever. On timeout the
-          // run is disposed — dispose cancels remaining child work and waits
-          // for settlement — so no orphan child keeps running.
-          const result = btwTimeoutMs > 0
-            ? await Promise.race([
-              run.result,
-              new Promise<never>((_, reject) => {
-                timer = setTimeout(() => {
-                  reject(new Error(`timed out after ${btwTimeoutMs} ms`))
-                }, btwTimeoutMs)
-              }),
-            ])
-            : await run.result
-          const text = renderResultText(result.output)
+          // Non-blocking one-shot: the child keeps running in the background
+          // and its answer streams into the sidechain panel — the main
+          // session input stays free, nothing is awaited past the start.
+          const run = await askSideOneShot(subagents, agent, question, deps, signal)
           // The trailing id is the machine-readable jump target for the client card.
-          return { kind: 'success', text: `${truncateText(text, maxResultChars)}\n\n(btw session: ${run.id})` }
+          return { kind: 'success', text: `BTW question started: ${run.id}.` }
         } catch (error) {
           return { kind: 'error', text: `sidechain: /btw failed: ${messageOf(error)}` }
-        } finally {
-          if (timer !== undefined) clearTimeout(timer)
-          if (run !== undefined) {
-            // On the timeout path this cancels the child's remaining work and
-            // waits for its settlement before the error result is returned.
-            await run.dispose().catch(() => { /* disposal failure must not mask the answer */ })
-          }
         }
       },
     },

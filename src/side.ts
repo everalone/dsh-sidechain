@@ -3,8 +3,9 @@
  *
  * Both commands share one mechanism (Codex semantics): fork the current
  * session — the child inherits the parent's completed conversation turns as
- * reference context only — then either run one disposable question (`/btw`,
- * one-shot) or open a durable continuable side thread (`/side`).
+ * reference context only — then either start a one-shot side question (`/btw`,
+ * whose answer streams into the sidechain panel) or open a durable
+ * continuable side thread (`/side`).
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -61,7 +62,9 @@ export function sidePrompt(question?: string): ContentBlock {
 
 /**
  * Start one disposable side question (`/btw`): a one-shot fork run whose
- * result carries the answer; the child session stays out of the main history.
+ * answer streams into the sidechain panel; the child session stays out of the
+ * main history. The caller returns as soon as the run is started — nothing
+ * here waits for the child to settle.
  */
 export function askSideOneShot(
   subagents: SubagentsLike,
@@ -104,21 +107,6 @@ export function startSideConversation(
     },
     signal,
   })
-}
-
-/** Join the text blocks of a one-shot result into one readable answer. */
-export function renderResultText(output: readonly ContentBlock[]): string {
-  return output
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map(block => block.text)
-    .join('\n')
-}
-
-/** Code-point-safe truncation with an explicit notice. */
-export function truncateText(text: string, maxChars: number): string {
-  const chars = [...text]
-  if (chars.length <= maxChars) return text
-  return chars.slice(0, maxChars).join('') + '\n\n… (truncated)'
 }
 
 /** One-line label from the question's first words; empty when there is none. */

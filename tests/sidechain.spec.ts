@@ -21,9 +21,7 @@ import { createSidechainCommands } from '../src/commands'
 import { SIDE_BOUNDARY_PROMPT, SIDE_PERSONA, SIDE_WAITING_NOTE } from '../src/prompts'
 import {
   formatSideList,
-  renderResultText,
   truncateLabel,
-  truncateText,
   type SideDeps,
   type SubagentsLike,
 } from '../src/side'
@@ -48,14 +46,14 @@ interface Harness {
   commands: CommandDefinition[]
 }
 
-function makeHarness(deps: SideDeps = DEFAULT_DEPS, maxResultChars = 8000, btwTimeoutMs = 0): Harness {
+function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
   const subagents = {
     start: vi.fn(),
     startContinuable: vi.fn(),
     listChildren: vi.fn(),
     getProvider: vi.fn(() => ({ name: deps.providerName })),
   } as unknown as Harness['subagents']
-  const commands = createSidechainCommands(subagents, deps, maxResultChars, btwTimeoutMs)
+  const commands = createSidechainCommands(subagents, deps)
   return { subagents, commands }
 }
 
@@ -71,16 +69,13 @@ function textOf(block: ContentBlock): string {
   return block.type === 'text' ? block.text : ''
 }
 
-function runWith(
-  output: ContentBlock[],
-  result: Promise<SubagentRun['result'] extends Promise<infer R> ? R : never> =
-    Promise.resolve({ output, structured: undefined, stopReason: 'completed' as const }),
-): SubagentRun {
+/** A minimal started run; by default its result never settles (still running). */
+function runOf(result: Promise<unknown> = new Promise<never>(() => {})): SubagentRun {
   return {
     id: CHILD_ID,
     local: true,
     stopReason: 'completed',
-    lastAssistantMessage: output,
+    lastAssistantMessage: [],
     result,
     dispose: vi.fn().mockResolvedValue(undefined),
   } as unknown as SubagentRun
@@ -135,15 +130,14 @@ describe('command registration', () => {
   })
 })
 
-describe('/btw (one-shot side question)', () => {
-  it('forks a one-shot run with boundary + question and returns the answer inline', async () => {
+describe('/btw (non-blocking one-shot side question)', () => {
+  it('starts a one-shot run with boundary + question and returns the child id', async () => {
     const { subagents, commands } = makeHarness()
-    const run = runWith([{ type: 'text', text: 'The answer is 42.' }])
-    subagents.start.mockResolvedValue(run)
+    subagents.start.mockResolvedValue(runOf())
 
     const result = await invoke(commands[1]!, '  what is 6*7?  ')
 
-    expect(result).toEqual({ kind: 'success', text: `The answer is 42.\n\n(btw session: ${String(CHILD_ID)})` })
+    expect(result).toEqual({ kind: 'success', text: `BTW question started: ${String(CHILD_ID)}.` })
     expect(subagents.start).toHaveBeenCalledTimes(1)
     expect(subagents.start).toHaveBeenCalledWith('fork', expect.objectContaining({
       label: 'BTW: what is 6*7?',
@@ -154,23 +148,19 @@ describe('/btw (one-shot side question)', () => {
     const prompt = textOf(request.prompt[0]!)
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('what is 6*7?')
-    expect(run.dispose).toHaveBeenCalledTimes(1)
   })
 
-  it('truncates oversized answers with a notice and keeps the session id', async () => {
-    const { subagents, commands } = makeHarness(DEFAULT_DEPS, 20)
-    const long = 'x'.repeat(200)
-    subagents.start.mockResolvedValue(runWith([{ type: 'text', text: long }]))
+  it('resolves without awaiting the child result and keeps the run alive', async () => {
+    const { subagents, commands } = makeHarness()
+    const run = runOf()
+    subagents.start.mockResolvedValue(run)
 
     const result = await invoke(commands[1]!, 'question')
 
+    // The handler returns while the child is still running — the main session
+    // input stays free and the panel streams the answer from the child.
     expect(result.kind).toBe('success')
-    const text = result.kind === 'success' ? result.text : undefined
-    expect(text).toBeDefined()
-    const suffix = `\n\n(btw session: ${String(CHILD_ID)})`
-    expect(text!.endsWith(suffix)).toBe(true)
-    expect(text!.endsWith('… (truncated)' + suffix)).toBe(true)
-    expect(text!.slice(0, -suffix.length)).toHaveLength(20 + '\n\n… (truncated)'.length)
+    expect(run.dispose).not.toHaveBeenCalled()
   })
 
   it('rejects an empty question without calling the provider', async () => {
@@ -193,38 +183,14 @@ describe('/btw (one-shot side question)', () => {
     expect(subagents.start).not.toHaveBeenCalled()
   })
 
-  it('returns an error result and still disposes when the child fails', async () => {
+  it('returns an error result when starting the child fails', async () => {
     const { subagents, commands } = makeHarness()
-    const run = runWith([{ type: 'text', text: 'never' }], Promise.reject(new Error('boom')))
-    subagents.start.mockResolvedValue(run)
+    subagents.start.mockRejectedValue(new Error('boom'))
 
     const result = await invoke(commands[1]!, 'question')
 
     expect(result.kind).toBe('error')
     expect(result.kind === 'error' && result.text).toContain('/btw failed: boom')
-    expect(run.dispose).toHaveBeenCalledTimes(1)
-  })
-
-  it('times out a never-settling child and disposes it', async () => {
-    const { subagents, commands } = makeHarness(DEFAULT_DEPS, 8000, 50)
-    const run = runWith([{ type: 'text', text: 'never' }], new Promise<never>(() => {}))
-    subagents.start.mockResolvedValue(run)
-
-    const result = await invoke(commands[1]!, 'question')
-
-    expect(result.kind).toBe('error')
-    expect(result.kind === 'error' && result.text).toContain('/btw failed: timed out after 50 ms')
-    expect(run.dispose).toHaveBeenCalledTimes(1)
-  })
-
-  it('honors a zero timeout as unlimited', async () => {
-    const { subagents, commands } = makeHarness(DEFAULT_DEPS, 8000, 0)
-    const run = runWith([{ type: 'text', text: 'slow but settles' }])
-    subagents.start.mockResolvedValue(run)
-
-    const result = await invoke(commands[1]!, 'question')
-
-    expect(result.kind).toBe('success')
   })
 })
 
@@ -287,21 +253,6 @@ describe('/side (continuable side thread)', () => {
 })
 
 describe('text helpers', () => {
-  it('renders only text blocks', () => {
-    const output = [
-      { type: 'text', text: 'a' },
-      { type: 'text', text: 'b' },
-    ] as ContentBlock[]
-    expect(renderResultText(output)).toBe('a\nb')
-  })
-
-  it('truncates text code-point safely with a notice', () => {
-    expect(truncateText('hello', 10)).toBe('hello')
-    const cut = truncateText('🙂🙂🙂🙂', 4)
-    expect(cut).toBe('🙂🙂🙂🙂')
-    expect(truncateText('abcdef', 3)).toBe('abc\n\n… (truncated)')
-  })
-
   it('builds one-line labels from question prefixes', () => {
     expect(truncateLabel('  multiple   spaces  ')).toBe('multiple spaces')
     expect(truncateLabel('')).toBe('')
@@ -334,7 +285,7 @@ describe('plugin wiring', () => {
         callback({ commands: { register: definition => { registered.push(definition) } } })
       },
     }
-    apply(fakeCtx as never, { providerName: 'fork', persona: SIDE_PERSONA, maxResultChars: 8000, btwTimeoutMs: 120000 })
+    apply(fakeCtx as never, { providerName: 'fork', persona: SIDE_PERSONA })
 
     expect(registered.map(definition => definition.name)).toEqual(['side', 'btw'])
   })
@@ -352,11 +303,9 @@ describe('plugin wiring', () => {
       providerName: 'fork',
       persona: SIDE_PERSONA,
       readOnlyTools: ['read', 'grep'],
-      maxResultChars: 8000,
-      btwTimeoutMs: 120000,
     })
 
-    const run = runWith([{ type: 'text', text: 'ok' }])
+    const run = runOf()
     harness.subagents.start.mockResolvedValue(run)
     await invoke(registered[1]!, 'question')
 

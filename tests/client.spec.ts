@@ -32,10 +32,10 @@ describe('resolveChildSessionId', () => {
     }), 'side')).toBe(CHILD_ID)
   })
 
-  it('resolves /btw success text with the answer prefix', () => {
+  it('resolves /btw success text with the started marker', () => {
     expect(resolveChildSessionId(node({
       name: 'btw',
-      outcome: { kind: 'success', text: `1+1=2。\n\n(btw session: ${CHILD_ID})` },
+      outcome: { kind: 'success', text: `BTW question started: ${CHILD_ID}.` },
     }), 'btw')).toBe(CHILD_ID)
   })
 

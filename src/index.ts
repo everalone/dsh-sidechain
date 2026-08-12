@@ -7,8 +7,8 @@
  * prompt), runs under a side-conversation persona (no mutation unless asked,
  * sub-agents off-limits), and never writes into the main session's history.
  * `/side` opens a durable continuable side thread (visible in the web
- * subagent catalog); `/btw` runs one disposable question and returns the
- * answer inline.
+ * subagent catalog); `/btw` starts a one-shot side question whose answer
+ * streams into the sidechain panel. Neither command blocks the main session.
  */
 
 import type { Context } from 'cordis'
@@ -30,18 +30,12 @@ export interface Config {
   persona: string
   /** Optional allow-list of tool names kept visible in side conversations. */
   readOnlyTools?: string[]
-  /** Maximum characters of a one-shot `/btw` answer returned inline. */
-  maxResultChars: number
-  /** `/btw` run budget in ms; 0 disables the timeout. */
-  btwTimeoutMs: number
 }
 
 export const Config: z<Config> = z.object({
   providerName: z.string().default('fork'),
   persona: z.string().default(SIDE_PERSONA),
   readOnlyTools: z.array(z.string()),
-  maxResultChars: z.number().default(8000),
-  btwTimeoutMs: z.number().default(120000),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -57,9 +51,7 @@ export function apply(ctx: Context, config: Config): void {
   // Commands are an optional surface: without a command registry the plugin
   // still loads harmlessly in minimal deployments.
   ctx.inject(['commands'], (commandCtx) => {
-    for (const definition of createSidechainCommands(
-      ctx.subagents, deps, config.maxResultChars, config.btwTimeoutMs,
-    )) {
+    for (const definition of createSidechainCommands(ctx.subagents, deps)) {
       commandCtx.commands.register(definition)
     }
   })
