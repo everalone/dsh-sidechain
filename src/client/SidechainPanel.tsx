@@ -17,10 +17,11 @@
  * Data rides the runtime's live subagent catalog — `sessions.list` rows under
  * `subagentsByParent` — for membership, and the catalog's `subagent.history`
  * transcript RPC for conversation content (no activation, no navigation).
- * While the selected child is running, a poll refreshes the transcript tail
- * page (the host serves the live child's in-memory snapshot), so a `/side`
- * or `/btw` run streams into the panel near-live; the final state lands when
- * the catalog reports the child inactive.
+ * While the selected child is running, a poll reads its transcript tail (the
+ * host serves the live child's in-memory snapshot) and the transcript layer
+ * accumulates it with prior rounds, so a `/side` or `/btw` run streams into
+ * the panel near-live; the final state lands when the catalog reports the
+ * child inactive.
  *
  * The panel deliberately never attaches the child session client-side (no
  * `sessions.binding` / session-face subscription): instantiating a session
@@ -44,8 +45,9 @@ import type {
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  DisclosureRow, IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
+  DisclosureRow, IconBranchOutline16, IconBrowseOutline16, IconChevronLeftOutline14, IconCloseOutline16,
   IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
+  IconThinkOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -64,7 +66,7 @@ import type { TranscriptRow, ToolDetail } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
 export interface SidechainPanelInjected {
-  /** Fetch one child's transcript tail page (catalog `subagent.history`). */
+  /** Fetch one child's accumulated, seed-cut transcript. */
   readTranscript(address: SubagentAddress): Promise<{
     rows: readonly TranscriptRow[]
     produced: readonly string[]
@@ -249,6 +251,19 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--ds-color-surface-2, #eef2ff)', color: C.text1,
     width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
   },
+  disclosureSummary: {
+    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    color: C.text2,
+  },
+  disclosureSeparator: {
+    flex: 'none', width: 2, height: 2, margin: '0 8px', borderRadius: 1,
+    background: 'var(--ds-color-text-3, #9ca3af)',
+  },
+  disclosureBody: {
+    margin: '4px 0 4px 22px', padding: '8px 10px', maxHeight: 240, overflow: 'auto',
+    borderRadius: 6, background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text2,
+    fontFamily: MONO, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+  },
   toolRow: { color: C.text2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   toolFailed: { color: C.danger },
   toolDetail: { padding: '4px 0 6px' },
@@ -388,7 +403,7 @@ function ToolRow({ row, running, codeLabels }: {
   return (
     <DisclosureRow
       icon={<StateDot state={row.failed ? 'error' : running ? 'ongoing' : 'done'} />}
-      title={`🔧 ${title}`}
+      title={title}
       open={open}
       expandable={expandable}
       onToggle={() => { setOpen(value => !value) }}
@@ -427,12 +442,46 @@ function ToolRow({ row, running, codeLabels }: {
   )
 }
 
-/** One transcript row: user prompt, assistant answer, or a tool line. */
-function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
+/** Compact disclosure matching the main conversation's Think/context rows. */
+function TranscriptDisclosure({ row, streaming, t }: {
+  row: Extract<TranscriptRow, { kind: 'reasoning' | 'context' }>
+  streaming: boolean
+  t: SidechainPanelProps['t']
+}): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const summary = row.text.trim().split('\n').find(line => line !== '') ?? ''
+  const contextSource = row.kind === 'context' ? row.source : null
+  return (
+    <DisclosureRow
+      icon={row.kind === 'reasoning' ? <IconThinkOutline14 /> : <IconBrowseOutline16 size={14} />}
+      title={row.kind === 'reasoning'
+        ? t('view.reasoning')
+        : t(row.recall ? 'view.contextRecall' : 'view.context')}
+      open={open}
+      expandable
+      expandOnRowClick
+      onToggle={() => { setOpen(value => !value) }}
+      collapsedContent={(
+        <>
+          <span style={styles.disclosureSeparator} aria-hidden />
+          <span style={styles.disclosureSummary}>
+            {contextSource ?? (streaming ? summary.slice(-120) : summary)}
+          </span>
+        </>
+      )}
+    >
+      <pre style={styles.disclosureBody}>{row.text}</pre>
+    </DisclosureRow>
+  )
+}
+
+/** One transcript row from the child session's full visible timeline. */
+function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
   row: TranscriptRow
   streaming: boolean
   codeLabels: MarkdownCodeLabels | undefined
   fileMentions: MarkdownFileMentions | undefined
+  t: SidechainPanelProps['t']
 }): JSX.Element {
   if (row.kind === 'user') {
     return (
@@ -451,6 +500,9 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
         </div>
       </div>
     )
+  }
+  if (row.kind === 'reasoning' || row.kind === 'context') {
+    return <TranscriptDisclosure row={row} streaming={streaming} t={t} />
   }
   return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
 }
@@ -982,13 +1034,14 @@ export function SidechainPanel({
                 {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
                   <div style={styles.notice}>{t('view.empty')}</div>
                 )}
-                {(transcript ?? []).map(row => (
+                {(transcript ?? []).map((row, index, all) => (
                   <TranscriptRowView
-                    key={row.seq}
+                    key={`${row.kind}:${row.seq}:${index}`}
                     row={row}
-                    streaming={selectedRunning}
+                    streaming={selectedRunning && index === all.length - 1}
                     codeLabels={codeLabels}
                     fileMentions={fileMentions}
+                    t={t}
                   />
                 ))}
               </div>

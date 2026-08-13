@@ -1,9 +1,9 @@
 /**
- * Stop side-conversation settlement notices before they enter the parent
- * inbox. The platform's continuable-subagent manager normally delivers a
- * user-role `subagent-settled` message through `followup`, `steer`, or
- * `inject`; even filtering that message later at pre-step leaves inbox and
- * empty-turn events in the main Session log.
+ * Stop side-conversation reports and settlement notices before they enter the
+ * parent inbox. Continuable children can deliver both `subagent-report` and
+ * `subagent-settled` messages through `followup`, `steer`, or `inject`; even
+ * filtering later at pre-step leaves inbox and empty-turn events in the main
+ * Session log.
  *
  * Child identity is persisted under DSH_HOME so resumed parents still reject
  * notices from side children created before a restart. Only ids registered by
@@ -62,9 +62,9 @@ interface SettlementSource {
   senderSessionId?: string | undefined
 }
 
-function isSideSettlement(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
+function isSideChildDelivery(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
   const source = message.source as SettlementSource | undefined
-  return source?.kind === 'subagent-settled'
+  return (source?.kind === 'subagent-report' || source?.kind === 'subagent-settled')
     && source.senderSessionId !== undefined
     && children.has(source.senderSessionId as SessionId)
 }
@@ -87,7 +87,7 @@ export function createSettlementSilence(ctx: Context): SettlementSilence {
         configurable: true,
         writable: true,
         value(message: UserMessage): void {
-          if (!isSideSettlement(message, children)) original.call(agent, message)
+          if (!isSideChildDelivery(message, children)) original.call(agent, message)
         },
       })
     }

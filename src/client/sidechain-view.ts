@@ -12,12 +12,10 @@
  * shows only the child's own side conversation.
  *
  * Live streaming: `assistant/message` events only land when a step completes,
- * but `assistant/chunk` events stream token-level deltas in real time. The
- * mapping accumulates `text-delta` chunks per (turn, step) into a growing
- * row, and supersedes it with the assembled message once it lands — so
- * polling the tail page yields text that visibly streams while a side run is
- * in progress. The tail window is bounded (`TRANSCRIPT_MAX_MESSAGES`) because
- * the inherited seed can be tens of thousands of chunk events long.
+ * but `assistant/chunk` events stream token-level text and reasoning deltas.
+ * The mapping accumulates both per block and supersedes them with the
+ * assembled message once it lands. Tail polls merge into a per-child event
+ * cache, so old rounds remain visible without re-reading the inherited seed.
  */
 
 import type { IApiClient } from '@deepseek-ai/dsh-host-apiproxy'
@@ -25,6 +23,7 @@ import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/d
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
+import { contextProvenance } from '@deepseek-ai/dsh-client-runtime/src/client/sessions/context-provenance.ts'
 import { lastActivity } from './sidechain-activity.ts'
 
 /**
@@ -34,8 +33,6 @@ import { lastActivity } from './sidechain-activity.ts'
  * drag megabytes of inherited seed across the wire for every poll.
  */
 export const TRANSCRIPT_PAGE_MESSAGES = 8
-/** Backward page-walk cap before giving up on finding the seed boundary. */
-export const TRANSCRIPT_PAGE_CAP = 6
 /** Activity fetch: even smaller pages, fewer pages (only needs the tail). */
 export const ACTIVITY_PAGE_MESSAGES = 6
 export const ACTIVITY_PAGE_CAP = 4
@@ -55,6 +52,14 @@ export interface ToolDetail {
 export type TranscriptRow =
   | { kind: 'user'; seq: number; text: string }
   | { kind: 'assistant'; seq: number; text: string }
+  | { kind: 'reasoning'; seq: number; text: string }
+  | {
+    kind: 'context'
+    seq: number
+    text: string
+    source: string | null
+    recall: boolean
+  }
   | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
 /** The fork boundary prompt's first line (dropped from the transcript). */
@@ -98,7 +103,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   const events = entries.map(entry => entry.event)
   const seedEnd = lastSeedEnd(events)
   const rows: TranscriptRow[] = []
-  /** (turn, step) key → index of its accumulating stream row in `rows`. */
+  /** (turn, step, block, kind) key → index of its accumulating stream row. */
   const streamRows = new Map<string, number>()
   /** tool callId → index of its tool row in `rows` (result pairing). */
   const callRows = new Map<string, number>()
@@ -110,37 +115,61 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
       case 'user/message': {
         const text = blockText(event.data.content)
         if (text.startsWith(BOUNDARY_PREFIX)) break
-        rows.push({ kind: 'user', seq: event.seq, text })
+        const source = event.data.source as unknown
+        const sourceKind = typeof source === 'object' && source !== null
+          ? (source as Record<string, unknown>)['kind']
+          : undefined
+        if (sourceKind === undefined || sourceKind === 'user') {
+          rows.push({ kind: 'user', seq: event.seq, text })
+        } else {
+          const provenance = contextProvenance(source)
+          rows.push({
+            kind: 'context', seq: event.seq, text,
+            source: provenance.label,
+            recall: provenance.role === 'recall',
+          })
+        }
         break
       }
       case 'assistant/chunk': {
         const chunk = event.data.chunk
-        if (chunk.type !== 'text-delta' || chunk.text === '') break
-        const key = `${event.data.turn}:${event.data.step}`
+        if ((chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') || chunk.text === '') break
+        const kind = chunk.type === 'text-delta' ? 'assistant' : 'reasoning'
+        const key = `${event.data.turn}:${event.data.step}:${chunk.index}:${kind}`
         const existing = streamRows.get(key)
         if (existing !== undefined) {
           const row = rows[existing]
-          if (row !== undefined && row.kind === 'assistant') {
+          if (row !== undefined && row.kind === kind) {
             rows[existing] = { ...row, text: row.text + chunk.text }
           }
         } else {
           streamRows.set(key, rows.length)
-          rows.push({ kind: 'assistant', seq: event.seq, text: chunk.text })
+          rows.push({ kind, seq: event.seq, text: chunk.text })
         }
         break
       }
       case 'assistant/message': {
-        const key = `${event.data.turn}:${event.data.step}`
-        const existing = streamRows.get(key)
-        const text = blockText(event.data.message.content)
-        if (existing !== undefined) {
-          // Supersede the accumulated stream with the assembled message
-          // (same step key, but the message seq becomes the stable identity).
-          streamRows.delete(key)
-          rows[existing] = { kind: 'assistant', seq: event.seq, text }
-        } else {
-          rows.push({ kind: 'assistant', seq: event.seq, text })
+        const prefix = `${event.data.turn}:${event.data.step}:`
+        const streamed = [...streamRows.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([, index]) => index)
+        for (const key of [...streamRows.keys()]) {
+          if (key.startsWith(prefix)) streamRows.delete(key)
         }
+        const settled = event.data.message.content.flatMap((block): TranscriptRow[] => {
+          if (block.type === 'reasoning' && block.text !== '') {
+            return [{ kind: 'reasoning', seq: event.seq, text: block.text }]
+          }
+          if (block.type === 'text' && block.text !== '') {
+            return [{ kind: 'assistant', seq: event.seq, text: block.text }]
+          }
+          return []
+        })
+        if (settled.length === 0 && event.data.message.content.length === 0) {
+          settled.push({ kind: 'assistant', seq: event.seq, text: '…' })
+        }
+        if (streamed.length === 0) rows.push(...settled)
+        else rows.splice(Math.min(...streamed), streamed.length, ...settled)
         break
       }
       case 'tool/call': {
@@ -304,7 +333,7 @@ export function mergeProduced(
 }
 
 /**
- * Fetch a child's transcript tail page.
+ * Fetch a child's transcript.
  *
  * Reads through `session.history` rather than `subagent.history`: the
  * subagent path serves history without a presenter scope, so tool events
@@ -318,8 +347,8 @@ export function mergeProduced(
  * tail window would ship megabytes of seed per poll (measured: 20 messages
  * → ~7000 events, 1.4 MB, ~8 s on a long parent session). Instead the read
  * pages backwards in small windows until a window contains the seed
- * boundary, then cuts there — the panel receives only the child's own
- * conversation, one small page in the common case.
+ * boundary, then cuts there. Later reads fetch one tail page and merge those
+ * events into the cached child transcript, retaining earlier rounds.
  * @param sessions - the api client's sessions surface.
  * @param address - durable parent/child address (only the child id is used).
  * @returns display rows plus the produced-file vocabulary, or null on
@@ -330,12 +359,17 @@ export async function fetchTranscript(
   address: SubagentAddress,
 ): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
   const entries = await fetchSeedCutEntries(
-    sessions, address.childSessionId, TRANSCRIPT_PAGE_MESSAGES, TRANSCRIPT_PAGE_CAP,
+    sessions, address.childSessionId, TRANSCRIPT_PAGE_MESSAGES,
   )
   if (entries === null) return null
+  const previous = transcriptEntryCache.get(address.childSessionId) ?? []
+  const bySeq = new Map(previous.map(entry => [entry.event.seq, entry]))
+  for (const entry of entries) bySeq.set(entry.event.seq, entry)
+  const transcript = [...bySeq.values()].sort((a, b) => a.event.seq - b.event.seq)
+  transcriptEntryCache.set(address.childSessionId, transcript)
   return {
-    rows: transcriptRows(entries),
-    produced: producedPaths(entries),
+    rows: transcriptRows(transcript),
+    produced: producedPaths(transcript),
   }
 }
 
@@ -369,10 +403,13 @@ export async function fetchActivity(
  * seed is never re-downloaded after the first walk.
  */
 const seedBoundaryCache = new Map<string, number>()
+/** Child-owned history accumulated from cheap tail polls. */
+const transcriptEntryCache = new Map<string, readonly TranscriptEntry[]>()
 
-/** Test seam: drop all cached seed boundaries (fresh module state). */
+/** Test seam: drop cached seed boundaries and accumulated transcripts. */
 export function resetSeedBoundaryCache(): void {
   seedBoundaryCache.clear()
+  transcriptEntryCache.clear()
 }
 
 /**
@@ -390,22 +427,22 @@ export function resetSeedBoundaryCache(): void {
  * @param sessions - the api client's sessions surface.
  * @param childSessionId - the child whose own conversation to read.
  * @param pageMessages - messages per backward page.
- * @param pageCap - maximum backward pages before giving up (a child whose own
- *   conversation exceeds the cap returns the walked pages uncut — bounded).
+ * @param pageCap - optional backward-page cap for lightweight callers. The
+ *   transcript read omits it and continues until the seed boundary.
  * @returns the seed-cut entries, or null on transport/business failure.
  */
 async function fetchSeedCutEntries(
   sessions: IApiClient['sessions'],
   childSessionId: string,
   pageMessages: number,
-  pageCap: number,
+  pageCap?: number,
 ): Promise<readonly TranscriptEntry[] | null> {
   const cachedBoundary = seedBoundaryCache.get(childSessionId)
   const collected: TranscriptEntry[] = []
   let beforeSeq: number | undefined
   let boundarySeq = cachedBoundary
   try {
-    for (let page = 0; page < pageCap; page++) {
+    for (let page = 0; page < (pageCap ?? Number.POSITIVE_INFINITY); page++) {
       const response = await sessions.history({
         sessionId: childSessionId as SubagentAddress['childSessionId'],
         maxMessages: pageMessages,
@@ -467,4 +504,3 @@ export async function sendPrompt(
     return false
   }
 }
-

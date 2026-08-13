@@ -388,6 +388,8 @@ describe('fetchTranscript', () => {
     expect(history).toHaveBeenNthCalledWith(3, { sessionId: CHILD, maxMessages: 8 })
     expect(second).toEqual({
       rows: [
+        { kind: 'user', seq: 90, text: '旧问' },
+        { kind: 'assistant', seq: 91, text: '旧答' },
         { kind: 'user', seq: 92, text: '新问' },
         { kind: 'assistant', seq: 93, text: '新答' },
       ],

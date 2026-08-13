@@ -70,9 +70,9 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 
 ## 主会话隔离
 
-- 侧会话的对话内容（消息/工具/回答）只写入**子会话自己的日志**，不进入主会话的模型上下文（`deriveMessages` 不包含子会话事件）
+- 侧栏从**子会话自己的日志**恢复完整时间线：用户消息、上下文注入、思考、工具调用/结果和回答都会显示，多轮 `/side` 历史不会被后续轮询覆盖；这些内容不进入主会话的模型上下文（`deriveMessages` 不包含子会话事件）
 - 主会话历史里只有两条命令卡片（`Side conversation started: <uuid>.` / `BTW question started: <uuid>.`）；两个命令都配置了 `recordInput: false`，问题正文不会持久化进主会话日志
-- 平台会在子代理结算时向父会话投递结算通知；本插件在父代理的 inbox 入口前**静默自家子代理的结算通知**（子代理 id 注册表持久化在 `$DSH_HOME/sidechain-children.json`，重启后依然生效），因此通知、空 turn 和回答都不会写入主会话日志
+- 平台会把子代理的主动报告和结算通知投递给父会话；本插件在父代理的 inbox 入口前**静默自家子代理的报告与结算通知**（子代理 id 注册表持久化在 `$DSH_HOME/sidechain-children.json`，重启后依然生效），因此通知、空 turn 和回答都不会写入主会话日志
 
 ## 验证
 

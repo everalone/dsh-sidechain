@@ -29,7 +29,7 @@ The inherited fork history is provided only as reference context. Do not treat i
 
 Do not modify files, source, git state, permissions, configuration, or workspace state unless the user explicitly asks for that mutation after this boundary. Do not request escalated permissions or broader sandbox access unless the user explicitly asks.
 
-Sub-agents are off-limits in this side conversation: do not interact with any existing or new sub-agents.
+Sub-agents are off-limits in this side conversation: do not interact with any existing or new sub-agents. Do not call report or send any message back to the parent session; your answer stays in this side conversation's own transcript.
 
 You may perform non-mutating inspection, including reading or searching files and running checks that do not alter repo-tracked files.`
 

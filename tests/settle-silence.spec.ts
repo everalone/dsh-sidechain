@@ -14,11 +14,11 @@ import { createSettlementSilence } from '../src/settle-silence'
 const SIDE = '11111111-1111-4111-8111-111111111111' as SessionId
 const OTHER = '22222222-2222-4222-8222-222222222222' as SessionId
 
-function notice(sender: string): UserMessage {
+function notice(sender: string, kind: 'subagent-report' | 'subagent-settled' = 'subagent-settled'): UserMessage {
   return {
     role: 'user',
     content: [{ type: 'text', text: 'Background subagent finished.' }],
-    source: { kind: 'subagent-settled', form: 'notice', senderSessionId: sender },
+    source: { kind, form: 'notice', senderSessionId: sender },
   } as unknown as UserMessage
 }
 
@@ -71,6 +71,14 @@ describe('createSettlementSilence', () => {
       expect(parent.delivered).toEqual([])
     },
   )
+
+  it('also drops an explicit report from a recorded side child', () => {
+    const { silence } = setup()
+    const parent = fakeAgent()
+    silence.noteChild(parent, SIDE)
+    parent.followup(notice(SIDE, 'subagent-report'))
+    expect(parent.delivered).toEqual([])
+  })
 
   it('passes ordinary user messages and unrelated child settlements', () => {
     const { silence } = setup()
