@@ -4,7 +4,10 @@
  * config-driven wiring.
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CommandDefinition, CommandId, CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -18,7 +21,7 @@ import type {
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { apply, Config, inject, name } from '../src/index'
 import { createSidechainCommands } from '../src/commands'
-import { SIDE_BOUNDARY_PROMPT, SIDE_PERSONA, SIDE_WAITING_NOTE } from '../src/prompts'
+import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, SIDE_PERSONA, SIDE_WAITING_NOTE } from '../src/prompts'
 import {
   formatSideList,
   truncateLabel,
@@ -35,6 +38,15 @@ const DEFAULT_DEPS: SideDeps = {
   providerName: 'fork',
   persona: SIDE_PERSONA,
 }
+
+// The command handlers persist the child-id registry under DSH_HOME; point it
+// at a scratch dir so tests never touch the real home.
+beforeEach(() => {
+  vi.stubEnv('DSH_HOME', mkdtempSync(join(tmpdir(), 'dsh-sidechain-spec-')))
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 interface Harness {
   subagents: SubagentsLike & {
@@ -105,6 +117,13 @@ describe('pinned prompt text', () => {
     expect(SIDE_BOUNDARY_PROMPT).toContain('Only messages submitted after this boundary are active user instructions')
   })
 
+  it('declares the /side vs /btw mode so the child cannot misidentify itself', () => {
+    expect(SIDE_MODE_LINE.side).toContain('/side side conversation')
+    expect(SIDE_MODE_LINE.side).toContain('continuable thread')
+    expect(SIDE_MODE_LINE.btw).toContain('/btw one-shot side question')
+    expect(SIDE_MODE_LINE.btw).toContain('Answer once')
+  })
+
   it('persona forbids mutation unless asked and keeps sub-agents off-limits', () => {
     expect(SIDE_PERSONA).toContain('Do not modify files, source, git state, permissions, configuration, or workspace state unless the user explicitly asks')
     expect(SIDE_PERSONA).toContain('Sub-agents are off-limits in this side conversation')
@@ -118,9 +137,10 @@ describe('command registration', () => {
     expect(commands.map(command => command.name)).toEqual(['side', 'btw'])
   })
 
-  it('/btw declares an argument hint', () => {
+  it('/btw declares an argument hint and does not record the question body', () => {
     const { commands } = makeHarness()
     expect(commands[1]?.input).toEqual({ hint: '<question>' })
+    expect(commands[1]?.recordInput).toBe(false)
   })
 
   it('keeps descriptions terse like Codex', () => {
@@ -146,21 +166,48 @@ describe('/btw (non-blocking one-shot side question)', () => {
     }))
     const request = subagents.start.mock.calls[0]![1] as SubagentStartRequest
     const prompt = textOf(request.prompt[0]!)
+    expect(prompt).toContain(SIDE_MODE_LINE.btw)
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('what is 6*7?')
   })
 
-  it('resolves without awaiting the child result and keeps the run alive', async () => {
+  it('resolves without awaiting the child result — the input stays free', async () => {
     const { subagents, commands } = makeHarness()
+    // A never-settling result: the handler still returns immediately.
     const run = runOf()
     subagents.start.mockResolvedValue(run)
 
     const result = await invoke(commands[1]!, 'question')
 
     // The handler returns while the child is still running — the main session
-    // input stays free and the panel streams the answer from the child.
+    // input stays free and the panel streams the answer from the child. The
+    // background release awaits the settlement, so nothing disposes yet.
     expect(result.kind).toBe('success')
     expect(run.dispose).not.toHaveBeenCalled()
+  })
+
+  it('disposes the run once its result settles (release contract)', async () => {
+    const { subagents, commands } = makeHarness()
+    const run = runOf(Promise.resolve({ output: [], structured: undefined, stopReason: 'completed' }))
+    subagents.start.mockResolvedValue(run)
+
+    const result = await invoke(commands[1]!, 'question')
+    expect(result.kind).toBe('success')
+
+    // The background release chain (result → dispose) drains after the turn.
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(run.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('disposes even when the child run fails', async () => {
+    const { subagents, commands } = makeHarness()
+    const run = runOf(Promise.reject(new Error('child crash')))
+    subagents.start.mockResolvedValue(run)
+
+    await invoke(commands[1]!, 'question')
+
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(run.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('rejects an empty question without calling the provider', async () => {
@@ -209,6 +256,7 @@ describe('/side (continuable side thread)', () => {
     expect(spec.request.parent).toBe(agent)
     expect(spec.request.persona).toBe(SIDE_PERSONA)
     const prompt = textOf(spec.request.prompt[0]!)
+    expect(prompt).toContain(SIDE_MODE_LINE.side)
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('investigate the plugin seams')
   })
@@ -281,6 +329,7 @@ describe('plugin wiring', () => {
     const registered: CommandDefinition[] = []
     const fakeCtx = {
       subagents: makeHarness().subagents,
+      on: vi.fn(() => () => {}),
       inject: (_deps: string[], callback: (inner: { commands: { register: (d: CommandDefinition) => void } }) => void) => {
         callback({ commands: { register: definition => { registered.push(definition) } } })
       },
@@ -295,6 +344,7 @@ describe('plugin wiring', () => {
     const registered: CommandDefinition[] = []
     const fakeCtx = {
       subagents: harness.subagents,
+      on: vi.fn(() => () => {}),
       inject: (_deps: string[], callback: (inner: { commands: { register: (d: CommandDefinition) => void } }) => void) => {
         callback({ commands: { register: definition => { registered.push(definition) } } })
       },

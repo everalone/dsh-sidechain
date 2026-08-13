@@ -770,7 +770,6 @@ export function SidechainPanel({
     if (target === undefined || target.mode !== 'continuable') return
     const text = draft.trim()
     if (text === '') return
-    setDraft('')
     setSendFailed(false)
     const epoch = ++sendEpoch.current
     const ok = await actionsRef.current.sendPrompt(
@@ -778,7 +777,13 @@ export function SidechainPanel({
       text,
     )
     if (epoch !== sendEpoch.current) return
-    if (!ok) setSendFailed(true)
+    if (!ok) {
+      // A rejected send must not eat the user's typing — restore the draft.
+      setSendFailed(true)
+      setDraft(text)
+      return
+    }
+    setDraft('')
     request(target, false)
   }, [draft, request])
 

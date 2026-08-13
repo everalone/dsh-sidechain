@@ -168,7 +168,7 @@ describe('client apply wiring', () => {
     const injected = entry.options.inject!('parent-1')
     const address = { parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' }
     const transcript = await injected.readTranscript!(address)
-    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 20 })
+    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 8 })
     expect(transcript).toEqual({ rows: [], produced: [] })
     // The activity line reads a lighter tail page; an empty log yields null.
     const activityLine = await injected.readActivity!(address)

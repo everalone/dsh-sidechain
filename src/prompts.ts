@@ -36,3 +36,20 @@ You may perform non-mutating inspection, including reading or searching files an
 /** Line appended to the boundary when a side conversation starts without a question. */
 export const SIDE_WAITING_NOTE =
   'This side conversation was just created; wait for the user\'s first question.'
+
+/**
+ * The mode declaration carried INSIDE the boundary message (after its first
+ * sentence, so the message still opens with `Side conversation boundary` and
+ * the panel's boundary-row drop keeps working): the child's own identity
+ * line, so the forked model can never mistake which command created it
+ * (`/side` continuable thread vs `/btw` one-shot question).
+ */
+export const SIDE_MODE_LINE = {
+  side:
+    'Mode: this is a /side side conversation — a continuable thread. Your answers stay in this side thread and are viewed in the sidechain panel; they are never delivered into the main session.',
+  btw:
+    'Mode: this is a /btw one-shot side question. Answer once, in this side thread; the answer is viewed in the sidechain panel, not in the main session.',
+} as const
+
+/** Which side command a forked child belongs to (drives the mode line). */
+export type SideMode = keyof typeof SIDE_MODE_LINE

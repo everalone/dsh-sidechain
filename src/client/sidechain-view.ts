@@ -27,10 +27,18 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 import { lastActivity } from './sidechain-activity.ts'
 
-/** Tail-page size for one transcript fetch (messages, not raw events). */
-export const TRANSCRIPT_MAX_MESSAGES = 20
-/** Tail-page size for one activity fetch (the row preview needs only the tail). */
-export const ACTIVITY_MAX_MESSAGES = 6
+/**
+ * Tail-page size for one transcript fetch (messages per page). Small on
+ * purpose: a side child inherits the ENTIRE parent history as its fork seed,
+ * and the seed is dense with chunk/reasoning events — a large window would
+ * drag megabytes of inherited seed across the wire for every poll.
+ */
+export const TRANSCRIPT_PAGE_MESSAGES = 8
+/** Backward page-walk cap before giving up on finding the seed boundary. */
+export const TRANSCRIPT_PAGE_CAP = 6
+/** Activity fetch: even smaller pages, fewer pages (only needs the tail). */
+export const ACTIVITY_PAGE_MESSAGES = 6
+export const ACTIVITY_PAGE_CAP = 4
 
 /** One compact transcript row rendered in the panel. `seq` is the source
  *  event's log sequence — stable row identity for React keys across polls
@@ -304,6 +312,14 @@ export function mergeProduced(
  * resolves the session's preset scope from its log (`presenterScopeFor`),
  * so views — and thus the produced-file vocabulary — are available even for
  * cold (finished) children.
+ *
+ * The child's log STARTS with the entire inherited parent history (fork
+ * seed), which can be tens of thousands of chunk events. A single large
+ * tail window would ship megabytes of seed per poll (measured: 20 messages
+ * → ~7000 events, 1.4 MB, ~8 s on a long parent session). Instead the read
+ * pages backwards in small windows until a window contains the seed
+ * boundary, then cuts there — the panel receives only the child's own
+ * conversation, one small page in the common case.
  * @param sessions - the api client's sessions surface.
  * @param address - durable parent/child address (only the child id is used).
  * @returns display rows plus the produced-file vocabulary, or null on
@@ -313,17 +329,85 @@ export async function fetchTranscript(
   sessions: IApiClient['sessions'],
   address: SubagentAddress,
 ): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
+  const entries = await fetchSeedCutEntries(
+    sessions, address.childSessionId, TRANSCRIPT_PAGE_MESSAGES, TRANSCRIPT_PAGE_CAP,
+  )
+  if (entries === null) return null
+  return {
+    rows: transcriptRows(entries),
+    produced: producedPaths(entries),
+  }
+}
+
+/**
+ * Fetch one running child's live activity line (latest assistant text or
+ * last tool call) from a light seed-cut tail page — the list-row preview
+ * poll, kept much cheaper than the full transcript page (no produced
+ * vocabulary, fewer pages).
+ * @param sessions - the api client's sessions surface.
+ * @param address - durable parent/child address (only the child id is used).
+ * @returns the activity line, or null on transport/business failure or an
+ *   empty tail.
+ */
+export async function fetchActivity(
+  sessions: IApiClient['sessions'],
+  address: SubagentAddress,
+): Promise<string | null> {
+  const entries = await fetchSeedCutEntries(
+    sessions, address.childSessionId, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
+  )
+  if (entries === null) return null
+  return lastActivity(transcriptRows(entries)) ?? null
+}
+
+/**
+ * Page a child's log backwards from the tail in small windows until a window
+ * contains the fork seed's closing marker (`session/end-seed`), then return
+ * everything after that marker — the child's own conversation only. Overlap
+ * between pages is deduped by sequence, so an inclusive `beforeSeq` contract
+ * on the host is harmless.
+ * @param sessions - the api client's sessions surface.
+ * @param childSessionId - the child whose own conversation to read.
+ * @param pageMessages - messages per backward page.
+ * @param pageCap - maximum backward pages before giving up (a child whose own
+ *   conversation exceeds the cap returns the walked pages uncut — bounded).
+ * @returns the seed-cut entries, or null on transport/business failure.
+ */
+async function fetchSeedCutEntries(
+  sessions: IApiClient['sessions'],
+  childSessionId: string,
+  pageMessages: number,
+  pageCap: number,
+): Promise<readonly TranscriptEntry[] | null> {
+  const collected: TranscriptEntry[] = []
+  let beforeSeq: number | undefined
   try {
-    const response = await sessions.history({ sessionId: address.childSessionId, maxMessages: TRANSCRIPT_MAX_MESSAGES })
-    if (!response.result.ok) return null
-    const entries = response.result.value.events
-    return {
-      rows: transcriptRows(entries),
-      produced: producedPaths(entries),
+    for (let page = 0; page < pageCap; page++) {
+      const response = await sessions.history({
+        sessionId: childSessionId as SubagentAddress['childSessionId'],
+        maxMessages: pageMessages,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+      })
+      if (!response.result.ok) return null
+      const events = response.result.value.events
+      if (events.length === 0) break
+      const olderThan = collected.length > 0 ? collected[0]!.event.seq : undefined
+      const fresh = olderThan === undefined
+        ? events
+        : events.filter(entry => entry.event.seq < olderThan)
+      const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
+      if (seedEnd >= 0) {
+        collected.unshift(...fresh.slice(seedEnd + 1))
+        break
+      }
+      collected.unshift(...fresh)
+      if (fresh.length === 0) break
+      beforeSeq = fresh[0]!.event.seq
     }
   } catch {
     return null
   }
+  return collected
 }
 
 /**
@@ -351,25 +435,3 @@ export async function sendPrompt(
   }
 }
 
-/**
- * Fetch one running child's live activity line (latest assistant text or
- * last tool call) from a light tail page — the list-row preview poll, kept
- * much cheaper than the full transcript page (6 vs 20 messages, no produced
- * vocabulary).
- * @param sessions - the api client's sessions surface.
- * @param address - durable parent/child address (only the child id is used).
- * @returns the activity line, or null on transport/business failure or an
- *   empty tail.
- */
-export async function fetchActivity(
-  sessions: IApiClient['sessions'],
-  address: SubagentAddress,
-): Promise<string | null> {
-  try {
-    const response = await sessions.history({ sessionId: address.childSessionId, maxMessages: ACTIVITY_MAX_MESSAGES })
-    if (!response.result.ok) return null
-    return lastActivity(transcriptRows(response.result.value.events)) ?? null
-  } catch {
-    return null
-  }
-}

@@ -238,7 +238,7 @@ describe('mergeProduced', () => {
 })
 
 describe('fetchTranscript', () => {
-  it('maps the history tail page to rows via session.history', async () => {
+  it('maps the seed-cut history tail to rows via session.history', async () => {
     const history = vi.fn(() => Promise.resolve({
       result: {
         ok: true,
@@ -252,11 +252,83 @@ describe('fetchTranscript', () => {
       },
     }))
     const result = await fetchTranscript({ history } as never, ADDRESS)
-    expect(history).toHaveBeenCalledWith({ sessionId: CHILD, maxMessages: 20 })
+    expect(history).toHaveBeenCalledWith({ sessionId: CHILD, maxMessages: 8 })
     expect(result).toEqual({
       rows: [
         { kind: 'user', seq: 1, text: '嗨' },
         { kind: 'assistant', seq: 2, text: '你好' },
+      ],
+      produced: [],
+    })
+  })
+
+  it('walks backward to the seed boundary and cuts the inherited fork seed', async () => {
+    // Page 1 (tail): the child's own conversation, no end-seed.
+    const history = vi.fn()
+      .mockResolvedValueOnce({
+        result: {
+          ok: true,
+          value: {
+            events: [
+              { event: event('user/message', 90, { content: [{ type: 'text', text: '第二问' }] }) },
+              { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第二个答案' }] } }) },
+            ],
+            hasMore: false,
+          },
+        },
+      })
+      // Page 2 (older): inherited seed + the boundary marker.
+      .mockResolvedValueOnce({
+        result: {
+          ok: true,
+          value: {
+            events: [
+              { event: event('session/end-seed', 80, {}) },
+              { event: event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }) },
+            ],
+            hasMore: false,
+          },
+        },
+      })
+    const result = await fetchTranscript({ history } as never, ADDRESS)
+    expect(history).toHaveBeenNthCalledWith(1, { sessionId: CHILD, maxMessages: 8 })
+    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 90 })
+    // Only the child's own conversation survives the cut.
+    expect(result).toEqual({
+      rows: [
+        { kind: 'user', seq: 90, text: '第二问' },
+        { kind: 'assistant', seq: 91, text: '第二个答案' },
+      ],
+      produced: [],
+    })
+  })
+
+  it('dedupes overlapping page boundaries when the host page is inclusive', async () => {
+    const history = vi.fn()
+      .mockResolvedValueOnce({
+        result: { ok: true, value: {
+          events: [
+            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
+            { event: event('user/message', 92, { content: [{ type: 'text', text: '问' }] }) },
+          ],
+          hasMore: false,
+        } },
+      })
+      // Overlapping page: repeats seq 90 before the seed boundary.
+      .mockResolvedValueOnce({
+        result: { ok: true, value: {
+          events: [
+            { event: event('session/end-seed', 80, {}) },
+            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
+          ],
+          hasMore: false,
+        } },
+      })
+    const result = await fetchTranscript({ history } as never, ADDRESS)
+    expect(result).toEqual({
+      rows: [
+        { kind: 'user', seq: 90, text: '旧问' },
+        { kind: 'user', seq: 92, text: '问' },
       ],
       produced: [],
     })

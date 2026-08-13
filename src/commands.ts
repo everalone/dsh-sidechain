@@ -6,6 +6,7 @@
  */
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
+import { noteSideChild } from './settle-silence.ts'
 import {
   askSideOneShot,
   formatSideList,
@@ -43,6 +44,9 @@ export function createSidechainCommands(
         }
         try {
           const { childId } = await startSideConversation(subagents, agent, arg, deps, signal)
+          // Registered so the platform's settlement notice for this child is
+          // silenced in the parent's turn stream (viewed in the panel instead).
+          noteSideChild(childId)
           // The trailing id is the machine-readable jump target for the client card.
           return { kind: 'success', text: `Side conversation started: ${childId}.` }
         } catch (error) {
@@ -53,6 +57,9 @@ export function createSidechainCommands(
     {
       name: 'btw',
       description: 'Ask a quick question in an ephemeral fork of the current session',
+      // The question body is not persisted into the parent's command/run log:
+      // the child session is the durable record (the panel reads it there).
+      recordInput: false,
       input: { hint: '<question>' },
       handler: async ({ agent, rawInput, signal }) => {
         const question = rawInput.trim()
@@ -66,6 +73,17 @@ export function createSidechainCommands(
           // and its answer streams into the sidechain panel — the main
           // session input stays free, nothing is awaited past the start.
           const run = await askSideOneShot(subagents, agent, question, deps, signal)
+          // Registered so the platform's settlement notice for this child is
+          // silenced in the parent's turn stream (viewed in the panel instead).
+          noteSideChild(run.id)
+          // The run contract requires ALWAYS disposing once the result
+          // settles (types.ts: "must always dispose to cancel remaining work
+          // and reach quiescence"); an undisposed run keeps the child's
+          // Activation resident. Dispose in the background after settlement —
+          // the durable log stays, so the panel keeps reading the answer.
+          void run.result
+            .catch(() => { /* settlement failure still needs the release */ })
+            .then(() => run.dispose().catch(() => { /* disposal must not mask the command result */ }))
           // The trailing id is the machine-readable jump target for the client card.
           return { kind: 'success', text: `BTW question started: ${run.id}.` }
         } catch (error) {

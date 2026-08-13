@@ -16,6 +16,7 @@ import z from 'schemastery'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { createSidechainCommands } from './commands.ts'
 import { SIDE_PERSONA } from './prompts.ts'
+import { loadSideChildren, registerSettlementSilence } from './settle-silence.ts'
 import type { SideDeps } from './side.ts'
 
 export const name = 'dsh-sidechain'
@@ -38,7 +39,7 @@ export const Config: z<Config> = z.object({
   readOnlyTools: z.array(z.string()),
 })
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: Config): () => void {
   const toolFilter: ToolRestriction | undefined =
     config.readOnlyTools !== undefined && config.readOnlyTools.length > 0
       ? { allow: config.readOnlyTools }
@@ -55,4 +56,10 @@ export function apply(ctx: Context, config: Config): void {
       commandCtx.commands.register(definition)
     }
   })
+  // Side settlements must not wake the parent into a main-session reply —
+  // their conversations are viewed in the panel. The child-id registry is
+  // reloaded from disk (children created before a restart stay recognized),
+  // and the listener is a fiber effect: hot unload removes it with the plugin.
+  loadSideChildren()
+  return registerSettlementSilence(ctx)
 }
