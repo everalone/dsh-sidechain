@@ -89,3 +89,64 @@ export function resetSidechainPanel(): void {
   selected = undefined
   listeners.clear()
 }
+
+// ---- Panel width (drag-to-resize, persisted per browser) ----
+
+/** Default floating-panel width in px (the pre-drag fallback). */
+export const PANEL_DEFAULT_WIDTH = 360
+/** Hard floor for a dragged width (narrow columns are unusable). */
+export const PANEL_MIN_WIDTH = 320
+/** Hard ceiling for a dragged width in px (the 55% viewport cap still applies). */
+export const PANEL_MAX_WIDTH = 720
+/** localStorage key for the user's last dragged width. */
+export const WIDTH_STORAGE_KEY = 'dsh.sidechain.width'
+
+/**
+ * Ceiling for a dragged panel width: 55% of the viewport, never beyond the
+ * hard cap — the panel must never cover the whole conversation.
+ * @param viewportWidth - current `window.innerWidth`.
+ * @returns the maximum allowed panel width in px.
+ */
+export function panelMaxWidth(viewportWidth: number): number {
+  return Math.min(PANEL_MAX_WIDTH, Math.floor(viewportWidth * 0.55))
+}
+
+/**
+ * Clamp a candidate panel width into the allowed band.
+ * @param width - raw candidate (drag arithmetic can overshoot).
+ * @param viewportWidth - current viewport width.
+ * @returns the clamped width, at least {@link PANEL_MIN_WIDTH}.
+ */
+export function clampPanelWidth(width: number, viewportWidth: number): number {
+  return Math.min(Math.max(Math.floor(width), PANEL_MIN_WIDTH), panelMaxWidth(viewportWidth))
+}
+
+/**
+ * Read the persisted panel width. Storage is best-effort: an absent or
+ * malformed value (or no localStorage at all) falls back to undefined.
+ * @returns the stored width when it survives the structural check, else undefined.
+ */
+export function readPanelWidth(): number | undefined {
+  try {
+    const raw = localStorage.getItem(WIDTH_STORAGE_KEY)
+    if (raw === null) return undefined
+    const value = Number.parseInt(raw, 10)
+    if (!Number.isFinite(value) || value < PANEL_MIN_WIDTH) return undefined
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Persist a panel width (best-effort — storage failures are silent, the
+ * panel still works at the in-memory width).
+ * @param width - the width to store.
+ */
+export function writePanelWidth(width: number): void {
+  try {
+    localStorage.setItem(WIDTH_STORAGE_KEY, String(Math.floor(width)))
+  } catch {
+    // private mode / quota: non-fatal
+  }
+}

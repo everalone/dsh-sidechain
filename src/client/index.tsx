@@ -16,7 +16,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { SideCommandCard, type SideCommandCardInjected } from './SideCommandCard.tsx'
 import { SidechainPanel, type SidechainPanelInjected } from './SidechainPanel.tsx'
 import { openSidechainPanel, revealChild } from './panel-state.ts'
-import { fetchTranscript, sendPrompt } from './sidechain-view.ts'
+import { installSidechainStyle } from './panel-style.ts'
+import { fetchActivity, fetchTranscript, sendPrompt } from './sidechain-view.ts'
 import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
@@ -29,6 +30,9 @@ export function apply(ctx: ClientContext): void {
   const workspaces = ctx.get('workspaces') as IWorkspaces
   const subagents = connection.api.subagents
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-sidechain: sidechain dictionaries')
+  // One shared keyframe stylesheet (shimmer sweep); the effect's disposer
+  // removes it with the fiber — hot unload leaves no stray <style> tags.
+  ctx.effect(installSidechainStyle, 'dsh-sidechain: panel stylesheet')
   const cardInject = (mode: 'continuable' | 'one-shot') => (_parentSessionId: SessionId): SideCommandCardInjected => ({
     // A live settle reveals the panel with the new child selected — the main
     // session never switches (the transcript renders inside the sidebar).
@@ -66,6 +70,9 @@ export function apply(ctx: ClientContext): void {
       inject: (parentSessionId: SessionId): SidechainPanelInjected => ({
         readTranscript(address: SubagentAddress) {
           return fetchTranscript(connection.api.sessions, address)
+        },
+        readActivity(address: SubagentAddress) {
+          return fetchActivity(connection.api.sessions, address)
         },
         sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
           return sendPrompt(subagents, address, text)

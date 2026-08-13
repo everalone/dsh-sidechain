@@ -5,6 +5,15 @@
  * (and a composer for continuable threads) INSIDE the panel while the main
  * session stays untouched.
  *
+ * Panel chrome: the width is drag-resizable from the left edge (rAF-batched
+ * direct DOM writes, one store commit on pointer-up, persisted to
+ * localStorage, double-click resets), an expand toggle widens it to ~75vw,
+ * and Ctrl/Cmd+Shift+E toggles the whole panel. Running rows show a live
+ * activity line — the child's latest text or last tool call — polled from a
+ * light tail page every 3s while the panel is open and the document visible,
+ * with a shimmer sweep on the running label (installed once via
+ * panel-style.ts, reduced-motion safe).
+ *
  * Data rides the runtime's live subagent catalog — `sessions.list` rows under
  * `subagentsByParent` — for membership, and the catalog's `subagent.history`
  * transcript RPC for conversation content (no activation, no navigation).
@@ -25,22 +34,26 @@
  * the new child on a live settle.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback, useEffect, useMemo, useRef, useState,
+  type CSSProperties, type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type {
   SessionId, SessionListState, SessionSummary, SubagentAddress,
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
   DisclosureRow, IconBranchOutline16, IconChevronLeftOutline14, IconCloseOutline16,
-  IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
+  IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
-  closeSidechainPanel, isSidechainPanelOpen, selectChild, selectedChildId,
-  subscribeSidechainPanel, toggleSidechainPanel,
+  clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
+  readPanelWidth, selectChild, selectedChildId, subscribeSidechainPanel,
+  toggleSidechainPanel, writePanelWidth,
 } from './panel-state.ts'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
@@ -53,6 +66,8 @@ export interface SidechainPanelInjected {
     rows: readonly TranscriptRow[]
     produced: readonly string[]
   } | null>
+  /** Fetch one running child's live activity line (light tail page). */
+  readActivity(address: SubagentAddress): Promise<string | null>
   /** Deliver one human message to a continuable child. */
   sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string): Promise<boolean>
   /** Trigger a fresh catalog fetch for the parent session. */
@@ -156,11 +171,15 @@ const styles: Record<string, CSSProperties> = {
     background: C.primary, color: '#fff', fontSize: 11, lineHeight: '16px', textAlign: 'center',
   },
   panel: {
-    position: 'fixed', top: 0, right: 0, bottom: 0, width: 360, maxWidth: '85vw',
+    position: 'fixed', top: 0, right: 0, bottom: 0, width: 360, maxWidth: '92vw',
     display: 'flex', flexDirection: 'column',
     background: 'var(--ds-color-bg-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
     boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.12)', zIndex: 200,
     fontSize: 13, color: C.text1,
+  },
+  resizer: {
+    position: 'absolute', top: 0, bottom: 0, left: -6, width: 12,
+    cursor: 'col-resize', touchAction: 'none', zIndex: 2,
   },
   header: {
     display: 'flex', alignItems: 'center', gap: 8,
@@ -200,6 +219,14 @@ const styles: Record<string, CSSProperties> = {
   summary: {
     display: 'block', color: C.text2, fontSize: 12,
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  activityLine: {
+    display: '-webkit-box',
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: 2,
+    overflow: 'hidden',
+    color: C.text2, fontSize: 12, lineHeight: 1.4,
+    wordBreak: 'break-word', textAlign: 'left',
   },
   transcript: { flex: 1, overflowY: 'auto', padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 },
   userRow: { alignSelf: 'flex-start', maxWidth: '100%' },
@@ -242,9 +269,12 @@ const styles: Record<string, CSSProperties> = {
   },
 }
 
-/** Render one catalog row; clicking selects it for the embedded view. */
-function Row({ row, t, onSelect }: {
+/** Render one catalog row; clicking selects it for the embedded view.
+ *  Running rows carry a live activity line (latest text / tool call) under
+ *  the mode summary — polled separately and only while the panel is open. */
+function Row({ row, activityText, t, onSelect }: {
   row: SidechainRow
+  activityText: string | undefined
   t: SidechainPanelProps['t']
   onSelect: (childSessionId: SessionId) => void
 }): JSX.Element {
@@ -261,7 +291,8 @@ function Row({ row, t, onSelect }: {
     )
   }
   const mode = row.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-  const activity = row.activity === 'running' ? t('activity.running') : t('activity.inactive')
+  const running = row.activity === 'running'
+  const activity = running ? t('activity.running') : t('activity.inactive')
   return (
     <button
       type="button"
@@ -270,10 +301,18 @@ function Row({ row, t, onSelect }: {
       aria-label={t('row.open', { label: row.label })}
       onClick={() => onSelect(row.id)}
     >
-      <StateDot state={row.activity === 'running' ? 'ongoing' : 'done'} />
+      <StateDot state={running ? 'ongoing' : 'done'} />
       <span style={styles.content}>
         <span style={styles.label}>{row.label}</span>
-        <span style={styles.summary}>{`${mode} · ${activity}`}</span>
+        <span style={styles.summary}>
+          {`${mode} · `}
+          {running
+            ? <span className="dsh-sidechain-shimmer">{activity}</span>
+            : activity}
+        </span>
+        {activityText !== undefined && (
+          <span style={styles.activityLine} title={activityText}>{activityText}</span>
+        )}
       </span>
     </button>
   )
@@ -410,6 +449,8 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions }: {
 
 /** Poll interval for the selected child's transcript while it is running (ms). */
 const LIVE_POLL_INTERVAL_MS = 1200
+/** Poll interval for running rows' activity lines (ms). */
+const ACTIVITY_POLL_INTERVAL_MS = 3000
 
 /**
  * The header action: a toggle button plus, while open, the floating right
@@ -419,7 +460,7 @@ const LIVE_POLL_INTERVAL_MS = 1200
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSessions, readTranscript, sendPrompt, refresh, setCatalogOpen, openPath, t,
+  sessionId, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -439,8 +480,8 @@ export function SidechainPanel({
 
   // The injected actions can be recreated per render; keep effects pinned to
   // stable keys, reading the latest actions through a ref.
-  const actionsRef = useRef({ readTranscript, sendPrompt, refresh, setCatalogOpen })
-  actionsRef.current = { readTranscript, sendPrompt, refresh, setCatalogOpen }
+  const actionsRef = useRef({ readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen })
+  actionsRef.current = { readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen }
 
   // Arm the catalog feed and refresh while open; disarm on close or when the
   // panel moves to another session (the cleanup runs with the old session id).
@@ -451,6 +492,94 @@ export function SidechainPanel({
     refresh(sessionId)
     return () => { actionsRef.current.setCatalogOpen(sessionId, false) }
   }, [open, sessionId])
+
+  // ---- Panel width: drag-to-resize (rAF-batched direct DOM writes, one
+  // store commit on pointer-up), double-click reset, expand toggle, all
+  // clamped and persisted. The panel element's style is written directly
+  // while dragging so the streaming transcript never re-renders per frame. ----
+  const [width, setWidth] = useState(() => readPanelWidth() ?? PANEL_DEFAULT_WIDTH)
+  const [expanded, setExpanded] = useState(false)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const widthRef = useRef(width)
+  widthRef.current = width
+  /** Pre-expand width, restored when the expand toggle switches back. */
+  const expandedRef = useRef<number | null>(null)
+  const dragRef = useRef<{ startX: number; startWidth: number; raf: number | null; pending: number } | null>(null)
+
+  const applyDragWidth = useCallback((value: number) => {
+    panelRef.current?.style.setProperty('width', `${value}px`)
+  }, [])
+  const onResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    expandedRef.current = null
+    const startWidth = panelRef.current?.getBoundingClientRect().width ?? widthRef.current
+    dragRef.current = { startX: event.clientX, startWidth, raf: null, pending: startWidth }
+  }, [])
+  const onResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (drag === null) return
+    drag.pending = clampPanelWidth(drag.startWidth + drag.startX - event.clientX, window.innerWidth)
+    if (drag.raf === null) {
+      drag.raf = requestAnimationFrame(() => {
+        drag.raf = null
+        applyDragWidth(drag.pending)
+      })
+    }
+  }, [applyDragWidth])
+  const onResizePointerUp = useCallback(() => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (drag === null) return
+    if (drag.raf !== null) {
+      cancelAnimationFrame(drag.raf)
+      applyDragWidth(drag.pending)
+    }
+    widthRef.current = drag.pending
+    setWidth(drag.pending)
+    writePanelWidth(drag.pending)
+  }, [applyDragWidth])
+  const onResizeDoubleClick = useCallback(() => {
+    expandedRef.current = null
+    widthRef.current = PANEL_DEFAULT_WIDTH
+    setWidth(PANEL_DEFAULT_WIDTH)
+    setExpanded(false)
+    writePanelWidth(PANEL_DEFAULT_WIDTH)
+  }, [])
+  const toggleExpanded = useCallback(() => {
+    if (expandedRef.current !== null) {
+      const back = expandedRef.current
+      expandedRef.current = null
+      widthRef.current = back
+      setWidth(back)
+      setExpanded(false)
+      writePanelWidth(back)
+    } else {
+      expandedRef.current = widthRef.current
+      const wide = Math.max(PANEL_DEFAULT_WIDTH, Math.floor(window.innerWidth * 0.75))
+      widthRef.current = wide
+      setWidth(wide)
+      setExpanded(true)
+    }
+  }, [])
+  // Unmount mid-drag must not leak a pending animation frame.
+  useEffect(() => () => {
+    const drag = dragRef.current
+    if (drag !== null && drag.raf !== null) cancelAnimationFrame(drag.raf)
+  }, [])
+
+  // Keyboard shortcut: Ctrl/Cmd+Shift+E toggles the panel (same gesture family
+  // as the host's command palette; no default browser action is shadowed).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'e') {
+        event.preventDefault()
+        toggleSidechainPanel()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [])
 
   // The selected child's durable address (stable while selection/catalog stay).
   const address = useMemo<SubagentAddress | undefined>(() => {
@@ -527,6 +656,66 @@ export function SidechainPanel({
     return () => { clearInterval(timer) }
   }, [request])
 
+  // ---- Running rows' activity lines: a light tail poll per running child
+  // (6-message pages, 3s cadence), only while the panel is open and the
+  // document visible. Per-child epochs discard stale responses; entries are
+  // pruned when their child stops running. ----
+  const runningRows = useMemo(
+    () => rows.filter((row): row is Extract<SidechainRow, { kind: 'child' }> =>
+      row.kind === 'child' && row.activity === 'running'),
+    [rows],
+  )
+  const runningIds = useMemo(() => runningRows.map(row => row.id), [runningRows])
+  const runningIdsRef = useRef(runningIds)
+  runningIdsRef.current = runningIds
+  const runningRowsRef = useRef(runningRows)
+  runningRowsRef.current = runningRows
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
+  const [activity, setActivity] = useState<Readonly<Record<SessionId, string>>>({})
+  const activityEpoch = useRef(new Map<string, number>())
+  const pollActivity = useCallback(() => {
+    if (!openRef.current || document.hidden) return
+    const targets = runningRowsRef.current
+    if (targets.length === 0) return
+    const { readActivity } = actionsRef.current
+    for (const row of targets) {
+      const address: SubagentAddress = {
+        parentSessionId: sessionIdRef.current,
+        childSessionId: row.id,
+        mode: row.mode,
+      }
+      const epoch = (activityEpoch.current.get(row.id) ?? 0) + 1
+      activityEpoch.current.set(row.id, epoch)
+      void readActivity(address).then((line) => {
+        if (activityEpoch.current.get(row.id) !== epoch || line === null) return
+        setActivity(previous => previous[row.id] === line ? previous : { ...previous, [row.id]: line })
+      })
+    }
+  }, [])
+  useEffect(() => {
+    const timer = setInterval(() => { pollActivity() }, ACTIVITY_POLL_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [pollActivity])
+  // Immediate catch-up whenever the panel opens or the running set changes
+  // (catalog flip), then the interval owns the cadence.
+  useEffect(() => {
+    if (open) pollActivity()
+  }, [open, runningIds, pollActivity])
+  // A child that stopped running drops out of the preview map.
+  useEffect(() => {
+    setActivity((previous) => {
+      const active = new Set(runningIds)
+      const keys = Object.keys(previous) as SessionId[]
+      if (keys.length === runningIds.length && keys.every(key => active.has(key))) return previous
+      const next: Record<SessionId, string> = {}
+      for (const key of keys) {
+        if (active.has(key) && previous[key] !== undefined) next[key] = previous[key]
+      }
+      return next
+    })
+  }, [runningIds])
+
   // On the running → inactive transition (the catalog activity flip): pull
   // the settled transcript exactly, and mark the finalize swap — the rows
   // switch from streaming to settled rendering (syntax highlighting, KaTeX,
@@ -573,6 +762,9 @@ export function SidechainPanel({
   // Composer state for continuable children.
   const [draft, setDraft] = useState('')
   const [sendFailed, setSendFailed] = useState(false)
+  // Send epoch: a prompt already in flight must never update the composer
+  // after a newer send (or unmount) — the same staleness guard the polls use.
+  const sendEpoch = useRef(0)
   const send = useCallback(async () => {
     const target = addressRef.current
     if (target === undefined || target.mode !== 'continuable') return
@@ -580,10 +772,12 @@ export function SidechainPanel({
     if (text === '') return
     setDraft('')
     setSendFailed(false)
+    const epoch = ++sendEpoch.current
     const ok = await actionsRef.current.sendPrompt(
       { parentSessionId: target.parentSessionId, childSessionId: target.childSessionId, mode: 'continuable' },
       text,
     )
+    if (epoch !== sendEpoch.current) return
     if (!ok) setSendFailed(true)
     request(target, false)
   }, [draft, request])
@@ -606,7 +800,17 @@ export function SidechainPanel({
         {running > 0 && <span style={styles.badge}>{running}</span>}
       </button>
       {open && (
-        <aside style={styles.panel} role="complementary" aria-label={t('panel.title')}>
+        <aside ref={panelRef} style={{ ...styles.panel, width }} role="complementary" aria-label={t('panel.title')}>
+          <div
+            style={styles.resizer}
+            title={t('panel.resize')}
+            role="separator"
+            aria-orientation="vertical"
+            onPointerDown={onResizePointerDown}
+            onPointerMove={onResizePointerMove}
+            onPointerUp={onResizePointerUp}
+            onDoubleClick={onResizeDoubleClick}
+          />
           <div style={styles.header}>
             {address === undefined ? (
               <span style={styles.title}>{t('panel.title')}</span>
@@ -624,6 +828,16 @@ export function SidechainPanel({
             {address === undefined && running > 0 && (
               <span style={styles.runningCount}>{t('count.running', { count: running })}</span>
             )}
+            <button
+              type="button"
+              style={styles.iconButton}
+              title={expanded ? t('panel.contract') : t('panel.expand')}
+              aria-label={expanded ? t('panel.contract') : t('panel.expand')}
+              aria-pressed={expanded}
+              onClick={toggleExpanded}
+            >
+              <IconFullscreenOutline16 />
+            </button>
             <button
               type="button"
               style={styles.iconButton}
@@ -669,6 +883,9 @@ export function SidechainPanel({
                 <Row
                   key={row.id}
                   row={row}
+                  activityText={
+                    row.kind === 'child' && row.activity === 'running' ? activity[row.id] : undefined
+                  }
                   t={t}
                   onSelect={(childSessionId) => { selectChild(childSessionId) }}
                 />

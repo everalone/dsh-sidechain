@@ -3,11 +3,12 @@
  */
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  closeSidechainPanel, isSidechainPanelOpen, openSidechainPanel, revealChild,
-  resetSidechainPanel, selectedChildId, selectChild, subscribeSidechainPanel,
-  toggleSidechainPanel,
+  clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, openSidechainPanel,
+  PANEL_DEFAULT_WIDTH, PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, panelMaxWidth,
+  readPanelWidth, resetSidechainPanel, revealChild, selectedChildId, selectChild,
+  subscribeSidechainPanel, toggleSidechainPanel, writePanelWidth,
 } from '../src/client/panel-state'
 
 const CHILD_A = '11111111-1111-4111-8111-111111111111' as SessionId
@@ -91,5 +92,49 @@ describe('panel-state', () => {
     toggleSidechainPanel()
     // The post-reset transition must not reach the dropped listener.
     expect(listener).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('panel width helpers', () => {
+  const storage = new Map<string, string>()
+  beforeEach(() => {
+    storage.clear()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+    })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('caps the dragged ceiling at 55% of the viewport and the hard cap', () => {
+    expect(panelMaxWidth(2000)).toBe(PANEL_MAX_WIDTH)
+    expect(panelMaxWidth(1000)).toBe(550)
+    expect(panelMaxWidth(500)).toBe(275)
+  })
+
+  it('clamps widths into the allowed band', () => {
+    expect(clampPanelWidth(100, 2000)).toBe(PANEL_MIN_WIDTH)
+    expect(clampPanelWidth(500, 2000)).toBe(500)
+    expect(clampPanelWidth(900, 2000)).toBe(PANEL_MAX_WIDTH)
+    expect(clampPanelWidth(500, 800)).toBe(440)
+  })
+
+  it('reads undefined without a stored value', () => {
+    expect(readPanelWidth()).toBeUndefined()
+  })
+
+  it('writes and reads a width round-trip', () => {
+    writePanelWidth(520)
+    expect(readPanelWidth()).toBe(520)
+  })
+
+  it('rejects a malformed or under-min stored value', () => {
+    writePanelWidth(PANEL_DEFAULT_WIDTH)
+    storage.set('dsh.sidechain.width', 'garbage')
+    expect(readPanelWidth()).toBeUndefined()
+    storage.set('dsh.sidechain.width', '120')
+    expect(readPanelWidth()).toBeUndefined()
   })
 })

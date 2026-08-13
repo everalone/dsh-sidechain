@@ -25,9 +25,12 @@ import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/d
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
+import { lastActivity } from './sidechain-activity.ts'
 
 /** Tail-page size for one transcript fetch (messages, not raw events). */
 export const TRANSCRIPT_MAX_MESSAGES = 20
+/** Tail-page size for one activity fetch (the row preview needs only the tail). */
+export const ACTIVITY_MAX_MESSAGES = 6
 
 /** One compact transcript row rendered in the panel. `seq` is the source
  *  event's log sequence — stable row identity for React keys across polls
@@ -345,5 +348,28 @@ export async function sendPrompt(
     return response.result.ok
   } catch {
     return false
+  }
+}
+
+/**
+ * Fetch one running child's live activity line (latest assistant text or
+ * last tool call) from a light tail page — the list-row preview poll, kept
+ * much cheaper than the full transcript page (6 vs 20 messages, no produced
+ * vocabulary).
+ * @param sessions - the api client's sessions surface.
+ * @param address - durable parent/child address (only the child id is used).
+ * @returns the activity line, or null on transport/business failure or an
+ *   empty tail.
+ */
+export async function fetchActivity(
+  sessions: IApiClient['sessions'],
+  address: SubagentAddress,
+): Promise<string | null> {
+  try {
+    const response = await sessions.history({ sessionId: address.childSessionId, maxMessages: ACTIVITY_MAX_MESSAGES })
+    if (!response.result.ok) return null
+    return lastActivity(transcriptRows(response.result.value.events)) ?? null
+  } catch {
+    return null
   }
 }

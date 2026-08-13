@@ -79,6 +79,7 @@ describe('client apply wiring', () => {
       inject?: (parentSessionId: string) => {
         revealPanel?: (childSessionId: string) => void
         readTranscript?: (address: unknown) => Promise<unknown>
+        readActivity?: (address: unknown) => Promise<unknown>
         sendPrompt?: (address: unknown, text: string) => Promise<boolean>
         refresh?: (parentSessionId: string) => void
         setCatalogOpen?: (parentSessionId: string, open: boolean) => void
@@ -169,6 +170,10 @@ describe('client apply wiring', () => {
     const transcript = await injected.readTranscript!(address)
     expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 20 })
     expect(transcript).toEqual({ rows: [], produced: [] })
+    // The activity line reads a lighter tail page; an empty log yields null.
+    const activityLine = await injected.readActivity!(address)
+    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 6 })
+    expect(activityLine).toBeNull()
     const accepted = await injected.sendPrompt!(address, '继续')
     expect(prompt).toHaveBeenCalledWith({ ...address, content: [{ type: 'text', text: '继续' }] })
     expect(accepted).toBe(true)
