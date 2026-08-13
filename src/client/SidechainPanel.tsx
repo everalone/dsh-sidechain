@@ -44,6 +44,7 @@ import type {
   CommandNode, SessionId, SessionListState, SessionSummary, SubagentAddress,
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SubagentCatalog } from '@deepseek-ai/dsh-client-connection/client'
 import {
   DisclosureRow, IconBranchOutline16, IconBrowseOutline16, IconChevronLeftOutline14, IconCloseOutline16,
   IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
@@ -122,7 +123,9 @@ export function sidechainRows(
   summaries: Readonly<Record<SessionId, SessionSummary>>,
 ): SidechainRow[] {
   if (catalog === undefined) return []
-  return catalog.entries.map((entry): SidechainRow => {
+  // 0812's emitted runtime declaration loses the wire catalog fields from
+  // SubagentCatalogSnapshot; the runtime value still implements this contract.
+  return (catalog as SubagentCatalogSnapshot & SubagentCatalog).entries.map((entry): SidechainRow => {
     if (entry.kind === 'diagnostic') {
       return { kind: 'diagnostic', id: entry.id, reason: entry.reason }
     }
@@ -915,8 +918,8 @@ export function SidechainPanel({
   }, [draft, request])
 
   const loading = catalog === undefined
-    || (catalog.state === 'loading' && catalog.entries.length === 0)
-  const empty = catalog !== undefined && catalog.state === 'ready' && catalog.entries.length === 0
+    || (catalog.state === 'loading' && rows.length === 0)
+  const empty = catalog !== undefined && catalog.state === 'ready' && rows.length === 0
 
   return (
     <>

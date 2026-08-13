@@ -4,13 +4,14 @@
 
 import { describe, expect, it } from 'vitest'
 import type { SessionId, SubagentCatalogSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SubagentCatalog } from '@deepseek-ai/dsh-client-connection/client'
 import { runningCount, sidechainRows } from '../src/client/SidechainPanel'
 
 const PARENT = 'parent-1' as SessionId
 const CHILD_A = '11111111-1111-4111-8111-111111111111' as SessionId
 const CHILD_B = '22222222-2222-4222-8222-222222222222' as SessionId
 
-function snapshot(entries: SubagentCatalogSnapshot['entries']): SubagentCatalogSnapshot {
+function snapshot(entries: SubagentCatalog['entries']): SubagentCatalogSnapshot & SubagentCatalog {
   return { entries, parentAvailable: true, state: 'ready', error: null }
 }
 
