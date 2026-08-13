@@ -6,7 +6,7 @@
  */
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
-import { noteSideChild } from './settle-silence.ts'
+import type { SettlementSilence } from './settle-silence.ts'
 import {
   askSideOneShot,
   formatSideList,
@@ -19,6 +19,7 @@ import {
 export function createSidechainCommands(
   subagents: SubagentsLike,
   deps: SideDeps,
+  settlementSilence: Pick<SettlementSilence, 'noteChild'>,
 ): CommandDefinition[] {
   /** Loud hint when the configured provider is absent from the deployment. */
   const missingProvider = (): string | undefined => {
@@ -30,6 +31,8 @@ export function createSidechainCommands(
     {
       name: 'side',
       description: 'Start a side conversation in an ephemeral fork of the current session',
+      recordInput: false,
+      input: { hint: '<question>' },
       handler: async ({ agent, rawInput, signal }) => {
         const missing = missingProvider()
         if (missing !== undefined) return { kind: 'error', text: missing }
@@ -42,11 +45,14 @@ export function createSidechainCommands(
             return { kind: 'error', text: `sidechain: failed to list side conversations: ${messageOf(error)}` }
           }
         }
+        if (arg === '') {
+          return { kind: 'error', text: '/side requires a question: /side <question>' }
+        }
         try {
           const { childId } = await startSideConversation(subagents, agent, arg, deps, signal)
-          // Registered so the platform's settlement notice for this child is
-          // silenced in the parent's turn stream (viewed in the panel instead).
-          noteSideChild(childId)
+          // Stop this child's settlement notice at the parent inbox boundary;
+          // the child remains visible in the sidechain panel.
+          settlementSilence.noteChild(agent, childId)
           // The trailing id is the machine-readable jump target for the client card.
           return { kind: 'success', text: `Side conversation started: ${childId}.` }
         } catch (error) {
@@ -73,9 +79,9 @@ export function createSidechainCommands(
           // and its answer streams into the sidechain panel — the main
           // session input stays free, nothing is awaited past the start.
           const run = await askSideOneShot(subagents, agent, question, deps, signal)
-          // Registered so the platform's settlement notice for this child is
-          // silenced in the parent's turn stream (viewed in the panel instead).
-          noteSideChild(run.id)
+          // Stop this child's settlement notice at the parent inbox boundary;
+          // the child remains visible in the sidechain panel.
+          settlementSilence.noteChild(agent, run.id)
           // The run contract requires ALWAYS disposing once the result
           // settles (types.ts: "must always dispose to cancel remaining work
           // and reach quiescence"); an undisposed run keeps the child's

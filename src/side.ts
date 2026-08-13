@@ -19,7 +19,7 @@ import type {
   SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
-import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, SIDE_WAITING_NOTE, type SideMode } from './prompts.ts'
+import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, type SideMode } from './prompts.ts'
 
 /** Minimal structural face of the subagent service this plugin consumes. */
 export interface SubagentsLike {
@@ -49,20 +49,15 @@ export function textBlock(text: string): ContentBlock {
 
 /**
  * The side conversation's opening user message: the boundary prompt (with the
- * mode declaration inside it), then the user's question when present, or a
- * waiting note when the side conversation starts empty. The message opens
+ * mode declaration inside it), then the user's question. The message opens
  * with `Side conversation boundary` so the panel's boundary-row drop keeps
  * hiding the whole internal prompt.
- * @param question - the user's question (empty for a bare `/side`).
+ * @param question - the user's question.
  * @param mode - which command created the child; declared to the child so it
  *   can never misidentify itself.
  */
-export function sidePrompt(question: string | undefined, mode: SideMode): ContentBlock {
-  const body = question?.trim()
-  const tail = body === undefined || body === ''
-    ? `\n\n${SIDE_WAITING_NOTE}`
-    : `\n\n${body}`
-  return textBlock(`${SIDE_BOUNDARY_PROMPT}\n\n${SIDE_MODE_LINE[mode]}${tail}`)
+export function sidePrompt(question: string, mode: SideMode): ContentBlock {
+  return textBlock(`${SIDE_BOUNDARY_PROMPT}\n\n${SIDE_MODE_LINE[mode]}\n\n${question.trim()}`)
 }
 
 /**

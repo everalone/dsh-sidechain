@@ -1,15 +1,15 @@
 /**
  * Unit tests for settlement-notice silencing: side children's `subagent-settled`
- * notices are dropped from the parent's pre-step turn, everything else passes.
+ * notices are stopped before they enter the parent inbox, everything else passes.
  */
 
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
-import { loadSideChildren, noteSideChild, registerSettlementSilence } from '../src/settle-silence'
+import { createSettlementSilence } from '../src/settle-silence'
 
 const SIDE = '11111111-1111-4111-8111-111111111111' as SessionId
 const OTHER = '22222222-2222-4222-8222-222222222222' as SessionId
@@ -30,37 +30,27 @@ function userMessage(text: string): UserMessage {
   } as unknown as UserMessage
 }
 
-/** The runtime-context message the host's default pre-step handler appends. */
-function contextMessage(): UserMessage {
+function fakeAgent(): Agent & { delivered: { method: string; message: UserMessage }[] } {
+  const delivered: { method: string; message: UserMessage }[] = []
   return {
-    role: 'user',
-    content: [{ type: 'text', text: '<runtime context>' }],
-    source: { kind: 'context' },
-  } as unknown as UserMessage
+    delivered,
+    followup(message: UserMessage) { delivered.push({ method: 'followup', message }) },
+    steer(message: UserMessage) { delivered.push({ method: 'steer', message }) },
+    inject(message: UserMessage) { delivered.push({ method: 'inject', message }) },
+  } as unknown as Agent & { delivered: { method: string; message: UserMessage }[] }
 }
 
-/** Capture the handler a ctx.on('agent/pre-step') registration installs. */
-function captureHandler(): { handler: (payload: unknown, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision> } {
-  const box = { handler: (() => Promise.resolve<PreStepDecision>({ kind: 'reject' })) as never }
+function setup(liveAgents: Agent[] = []) {
+  const created = { handler: undefined as ((payload: { agent: Agent }) => void) | undefined }
+  const dispose = vi.fn()
   const ctx = {
-    on: (_name: string, handler: unknown) => {
-      box.handler = handler as never
-      return () => {}
+    agents: { list: () => liveAgents },
+    on: (name: string, handler: unknown) => {
+      if (name === 'agent/created') created.handler = handler as (payload: { agent: Agent }) => void
+      return dispose
     },
   }
-  registerSettlementSilence(ctx as never)
-  return box as unknown as { handler: (payload: unknown, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision> }
-}
-
-async function run(
-  handler: (payload: unknown, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
-  claimed: UserMessage[],
-  extras: UserMessage[] = [],
-): Promise<PreStepDecision> {
-  return handler({ agent: {}, messages: claimed } as never, async () => ({
-    kind: 'enter' as const,
-    messages: [...claimed, ...extras],
-  }))
+  return { silence: createSettlementSilence(ctx as never), created, dispose }
 }
 
 beforeEach(() => {
@@ -70,62 +60,61 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-describe('registerSettlementSilence', () => {
-  it('drops the settlement notice of a recorded side child', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    const decision = await run(handler, [userMessage('继续干活'), notice(SIDE)])
-    expect(decision).toEqual({ kind: 'enter', messages: [userMessage('继续干活')] })
+describe('createSettlementSilence', () => {
+  it.each(['followup', 'steer', 'inject'] as const)(
+    'drops a recorded side child before parent.%s writes it to the inbox',
+    (method) => {
+      const { silence } = setup()
+      const parent = fakeAgent()
+      silence.noteChild(parent, SIDE)
+      parent[method](notice(SIDE))
+      expect(parent.delivered).toEqual([])
+    },
+  )
+
+  it('passes ordinary user messages and unrelated child settlements', () => {
+    const { silence } = setup()
+    const parent = fakeAgent()
+    silence.noteChild(parent, SIDE)
+    parent.followup(userMessage('继续干活'))
+    parent.steer(notice(OTHER))
+    expect(parent.delivered).toEqual([
+      { method: 'followup', message: userMessage('继续干活') },
+      { method: 'steer', message: notice(OTHER) },
+    ])
   })
 
-  it('rewrites an all-settlement batch to empty — no model call', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    const decision = await run(handler, [notice(SIDE)])
-    expect(decision).toEqual({ kind: 'enter', messages: [] })
+  it('patches future parent agents so persisted child ids stay silent after restart', () => {
+    const first = setup()
+    const original = fakeAgent()
+    first.silence.noteChild(original, SIDE)
+    first.silence.dispose()
+
+    const restarted = setup()
+    const resumedParent = fakeAgent()
+    restarted.created.handler?.({ agent: resumedParent })
+    resumedParent.followup(notice(SIDE))
+    expect(resumedParent.delivered).toEqual([])
   })
 
-  it('drops the appended runtime context too when nothing of the user remains', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    // The host appends its context message after the claimed batch; with every
-    // claimed message removed, the turn must still close without a model call.
-    const decision = await run(handler, [notice(SIDE)], [contextMessage()])
-    expect(decision).toEqual({ kind: 'enter', messages: [] })
+  it('patches parents that are already live when the plugin loads', () => {
+    const first = setup()
+    first.silence.noteChild(fakeAgent(), SIDE)
+    first.silence.dispose()
+
+    const liveParent = fakeAgent()
+    setup([liveParent])
+    liveParent.followup(notice(SIDE))
+    expect(liveParent.delivered).toEqual([])
   })
 
-  it('keeps the runtime context when a real user message survives', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    const decision = await run(handler, [userMessage('用户消息'), notice(SIDE)], [contextMessage()])
-    expect(decision).toEqual({ kind: 'enter', messages: [userMessage('用户消息'), contextMessage()] })
-  })
-
-  it('passes settlement notices of children this plugin did not create', async () => {
-    const { handler } = captureHandler()
-    const decision = await run(handler, [notice(OTHER)])
-    expect(decision).toEqual({ kind: 'enter', messages: [notice(OTHER)] })
-  })
-
-  it('passes every other message untouched', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    const decision = await run(handler, [userMessage('普通消息')])
-    expect(decision).toEqual({ kind: 'enter', messages: [userMessage('普通消息')] })
-  })
-
-  it('passes a rejected downstream decision through', async () => {
-    noteSideChild(SIDE)
-    const { handler } = captureHandler()
-    const decision = await handler({} as never, async () => ({ kind: 'reject' as const }))
-    expect(decision).toEqual({ kind: 'reject' })
-  })
-
-  it('returns a disposer that removes the listener', () => {
-    const dispose = vi.fn(() => {})
-    const ctx = { on: () => dispose }
-    const returned = registerSettlementSilence(ctx as never)
-    returned()
+  it('restores patched delivery methods and removes the created listener on dispose', () => {
+    const { silence, dispose } = setup()
+    const parent = fakeAgent()
+    silence.noteChild(parent, SIDE)
+    silence.dispose()
+    parent.followup(notice(SIDE))
+    expect(parent.delivered).toEqual([{ method: 'followup', message: notice(SIDE) }])
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 })
@@ -133,14 +122,15 @@ describe('registerSettlementSilence', () => {
 describe('durable child-id registry', () => {
   it('persists recorded ids under DSH_HOME and reloads them', async () => {
     const home = process.env.DSH_HOME!
-    noteSideChild(SIDE)
+    const first = setup()
+    first.silence.noteChild(fakeAgent(), SIDE)
     const path = join(home, 'sidechain-children.json')
     expect(existsSync(path)).toBe(true)
     expect(JSON.parse(readFileSync(path, 'utf8'))).toContain(SIDE)
-    // A fresh process would load the same file (in-process load is idempotent).
-    loadSideChildren()
-    const { handler } = captureHandler()
-    const decision = await run(handler, [notice(SIDE)])
-    expect(decision).toEqual({ kind: 'enter', messages: [] })
+    const restarted = setup()
+    const resumedParent = fakeAgent()
+    restarted.created.handler?.({ agent: resumedParent })
+    resumedParent.followup(notice(SIDE))
+    expect(resumedParent.delivered).toEqual([])
   })
 })

@@ -3,9 +3,9 @@
  * pieces.
  *
  * One store serves every entry that can open or close the right panel — the
- * conversation-header toggle button and the `/side` / `/btw` command cards
- * (which reveal the panel and select the new child on a live settle) — so
- * they never disagree about its open state. The selection drives the panel's
+ * conversation-header toggle and the composer-mounted panel host (which
+ * observes `/side` / `/btw` live settles) — so they never disagree about its
+ * open state. The selection drives the panel's
  * embedded conversation view: selecting a child shows its transcript while
  * the main session stays untouched. Module scope is safe here: the browser
  * half is a single bundle, so every import site sees the same instance.

@@ -1,33 +1,33 @@
 /**
- * Settlement-notice silencing for side conversations (server half).
+ * Stop side-conversation settlement notices before they enter the parent
+ * inbox. The platform's continuable-subagent manager normally delivers a
+ * user-role `subagent-settled` message through `followup`, `steer`, or
+ * `inject`; even filtering that message later at pre-step leaves inbox and
+ * empty-turn events in the main Session log.
  *
- * The subagent service guarantees every child an account at settlement: when
- * a child settles, it delivers a user-role `subagent-settled` notice into the
- * parent session and — if the parent is idle — wakes the parent into a new
- * turn, which makes the main session reply to a side conversation's end. Side
- * conversations are viewed in the sidechain panel by design, so that wake-up
- * reply is noise: this module drops the notices of children THIS plugin
- * created before the parent turn reaches the model, via the platform's
- * `agent/pre-step` waterfall (the seam whose contract explicitly allows
- * removing waking messages — an all-removed rewrite spends no model call).
- *
- * Identity is durable: the child id set is persisted under the DSH home
- * (`sidechain-children.json`), so a child created before a `dsh web` restart
- * is still recognized when it settles after the restart. Platform-delegated
- * children are never touched — only children our commands started are
- * silenced. (The `startContinuable` request carries no settlement-delivery
- * option on the host; the pre-step seam is the only available boundary.)
+ * Child identity is persisted under DSH_HOME so resumed parents still reject
+ * notices from side children created before a restart. Only ids registered by
+ * this plugin are suppressed; ordinary messages and other subagents use the
+ * original Agent delivery methods unchanged.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
-import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import { dirname, join } from 'node:path'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from 'cordis'
 import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 
-/** Child session ids our commands created (durable across restarts). */
-const sideChildren = new Set<SessionId>()
+type DeliveryMethod = 'followup' | 'steer' | 'inject'
+const DELIVERY_METHODS: readonly DeliveryMethod[] = ['followup', 'steer', 'inject']
+
+/** Per-plugin-instance settlement suppression face. */
+export interface SettlementSilence {
+  /** Register and immediately protect the parent of one side child. */
+  noteChild(parent: Agent, childId: SessionId): void
+  /** Restore wrapped agents and remove the future-agent listener. */
+  dispose(): void
+}
 
 /** The persisted child-id registry file (under the DSH home, like settings). */
 function registryPath(): string {
@@ -35,79 +35,85 @@ function registryPath(): string {
   return join(home, 'sidechain-children.json')
 }
 
-/** Best-effort load of the persisted registry (absent/corrupt file → empty). */
-export function loadSideChildren(): void {
+function loadChildren(): Set<SessionId> {
   try {
     const path = registryPath()
-    if (!existsSync(path)) return
-    const raw = readFileSync(path, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return
-    for (const id of parsed) {
-      if (typeof id === 'string') sideChildren.add(id as SessionId)
-    }
+    if (!existsSync(path)) return new Set()
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((id): id is SessionId => typeof id === 'string'))
   } catch {
-    // Unreadable registry is not fatal: new children still record and persist.
+    return new Set()
   }
 }
 
-/** Record one side-conversation child so its settlement notice is silenced. */
-export function noteSideChild(childId: SessionId): void {
-  sideChildren.add(childId)
+function saveChildren(children: ReadonlySet<SessionId>): void {
   try {
     const path = registryPath()
-    mkdirSync(join(path, '..'), { recursive: true })
-    writeFileSync(path, JSON.stringify([...sideChildren]), 'utf8')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify([...children]), 'utf8')
   } catch {
-    // Unwritable home is not fatal: the in-process set still silences this run.
+    // An unwritable home is non-fatal; the in-process guard still works.
   }
 }
 
-/** The notice shape the subagent service injects (source + sender id). */
 interface SettlementSource {
   kind?: string | undefined
   senderSessionId?: string | undefined
 }
 
-/** Whether one user message is the settlement notice of a side child. */
-function isSideSettlement(message: UserMessage): boolean {
+function isSideSettlement(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
   const source = message.source as SettlementSource | undefined
-  if (source?.kind !== 'subagent-settled') return false
-  const sender = source.senderSessionId
-  return sender !== undefined && sideChildren.has(sender as SessionId)
+  return source?.kind === 'subagent-settled'
+    && source.senderSessionId !== undefined
+    && children.has(source.senderSessionId as SessionId)
 }
 
 /**
- * Register the pre-step filter on the given context. For every parent turn
- * whose CLAIMED messages are settlement notices of our side children, those
- * notices are removed:
- *
- * - all claimed messages removed → the enter decision rewrites to an EMPTY
- *   message list, dropping the runtime-context message too, so the turn
- *   boundary closes with zero model calls (the platform's documented
- *   pre-step contract: "a removed waking message ... spends no model call").
- * - some claimed messages removed → the surviving user messages plus any
- *   appended context stay, so a real user turn is unaffected.
- *
- * @param ctx - the plugin context (root scope hears every agent's pre-step).
- * @returns the disposer unregistering the listener.
+ * Install the parent-inbox boundary for side settlement notices.
+ * @param ctx - root plugin context, used to protect future/resumed agents.
  */
-export function registerSettlementSilence(ctx: Context): () => void {
-  return ctx.on('agent/pre-step', async (
-    payload: { agent: Agent; messages: UserMessage[] },
-    next: () => Promise<PreStepDecision>,
-  ): Promise<PreStepDecision> => {
-    const decision = await next()
-    if (decision.kind !== 'enter') return decision
-    const claimed = payload.messages
-    if (claimed.every(message => !isSideSettlement(message))) return decision
-    const kept = claimed.filter(message => !isSideSettlement(message))
-    if (kept.length === 0) {
-      // Nothing of the user's own remained — drop the runtime context too;
-      // an empty enter ends the turn without a model call.
-      return { kind: 'enter', messages: [] }
+export function createSettlementSilence(ctx: Context): SettlementSilence {
+  const children = loadChildren()
+  const patched = new Map<Agent, ReadonlyMap<DeliveryMethod, PropertyDescriptor | undefined>>()
+
+  const protect = (agent: Agent): void => {
+    if (patched.has(agent)) return
+    const descriptors = new Map<DeliveryMethod, PropertyDescriptor | undefined>()
+    for (const method of DELIVERY_METHODS) {
+      descriptors.set(method, Object.getOwnPropertyDescriptor(agent, method))
+      const original = agent[method]
+      Object.defineProperty(agent, method, {
+        configurable: true,
+        writable: true,
+        value(message: UserMessage): void {
+          if (!isSideSettlement(message, children)) original.call(agent, message)
+        },
+      })
     }
-    const extras = decision.messages.filter(message => !claimed.includes(message))
-    return { kind: 'enter', messages: [...kept, ...extras] }
-  })
+    patched.set(agent, descriptors)
+  }
+
+  // Protect live parents on hot load and future parents after a cold restart.
+  for (const agent of ctx.agents.list()) protect(agent)
+  const removeCreatedListener = ctx.on('agent/created', ({ agent }) => { protect(agent) })
+
+  return {
+    noteChild(parent, childId): void {
+      protect(parent)
+      children.add(childId)
+      saveChildren(children)
+    },
+    dispose(): void {
+      removeCreatedListener()
+      for (const [agent, descriptors] of patched) {
+        for (const method of DELIVERY_METHODS) {
+          const descriptor = descriptors.get(method)
+          if (descriptor === undefined) delete (agent as unknown as Record<string, unknown>)[method]
+          else Object.defineProperty(agent, method, descriptor)
+        }
+      }
+      patched.clear()
+    },
+  }
 }

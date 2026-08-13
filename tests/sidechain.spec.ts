@@ -21,7 +21,7 @@ import type {
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { apply, Config, inject, name } from '../src/index'
 import { createSidechainCommands } from '../src/commands'
-import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, SIDE_PERSONA, SIDE_WAITING_NOTE } from '../src/prompts'
+import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, SIDE_PERSONA } from '../src/prompts'
 import {
   formatSideList,
   truncateLabel,
@@ -56,6 +56,7 @@ interface Harness {
     getProvider: ReturnType<typeof vi.fn>
   }
   commands: CommandDefinition[]
+  noteChild: ReturnType<typeof vi.fn>
 }
 
 function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
@@ -65,8 +66,9 @@ function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
     listChildren: vi.fn(),
     getProvider: vi.fn(() => ({ name: deps.providerName })),
   } as unknown as Harness['subagents']
-  const commands = createSidechainCommands(subagents, deps)
-  return { subagents, commands }
+  const noteChild = vi.fn()
+  const commands = createSidechainCommands(subagents, deps, { noteChild })
+  return { subagents, commands, noteChild }
 }
 
 function invoke(
@@ -137,9 +139,11 @@ describe('command registration', () => {
     expect(commands.map(command => command.name)).toEqual(['side', 'btw'])
   })
 
-  it('/btw declares an argument hint and does not record the question body', () => {
+  it('declares argument hints and keeps both questions out of the parent log', () => {
     const { commands } = makeHarness()
+    expect(commands[0]?.input).toEqual({ hint: '<question>' })
     expect(commands[1]?.input).toEqual({ hint: '<question>' })
+    expect(commands[0]?.recordInput).toBe(false)
     expect(commands[1]?.recordInput).toBe(false)
   })
 
@@ -152,7 +156,7 @@ describe('command registration', () => {
 
 describe('/btw (non-blocking one-shot side question)', () => {
   it('starts a one-shot run with boundary + question and returns the child id', async () => {
-    const { subagents, commands } = makeHarness()
+    const { subagents, commands, noteChild } = makeHarness()
     subagents.start.mockResolvedValue(runOf())
 
     const result = await invoke(commands[1]!, '  what is 6*7?  ')
@@ -169,6 +173,7 @@ describe('/btw (non-blocking one-shot side question)', () => {
     expect(prompt).toContain(SIDE_MODE_LINE.btw)
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('what is 6*7?')
+    expect(noteChild).toHaveBeenCalledWith(agent, CHILD_ID)
   })
 
   it('resolves without awaiting the child result — the input stays free', async () => {
@@ -243,7 +248,7 @@ describe('/btw (non-blocking one-shot side question)', () => {
 
 describe('/side (continuable side thread)', () => {
   it('starts a continuable fork child labeled from the question', async () => {
-    const { subagents, commands } = makeHarness()
+    const { subagents, commands, noteChild } = makeHarness()
     subagents.startContinuable.mockResolvedValue({ childId: CHILD_ID, messageId: 'm1' } as ContinuableStart)
 
     const result = await invoke(commands[0]!, '  investigate the plugin seams  ')
@@ -259,17 +264,16 @@ describe('/side (continuable side thread)', () => {
     expect(prompt).toContain(SIDE_MODE_LINE.side)
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('investigate the plugin seams')
+    expect(noteChild).toHaveBeenCalledWith(agent, CHILD_ID)
   })
 
-  it('uses a default label and waiting note when no question is given', async () => {
+  it('rejects an empty question instead of running a synthetic waiting turn', async () => {
     const { subagents, commands } = makeHarness()
-    subagents.startContinuable.mockResolvedValue({ childId: CHILD_ID, messageId: 'm1' } as ContinuableStart)
 
-    await invoke(commands[0]!, '')
+    const result = await invoke(commands[0]!, '   ')
 
-    const spec = subagents.startContinuable.mock.calls[0]![0] as ContinuableStartSpec
-    expect(spec.label).toBe('Side conversation')
-    expect(textOf(spec.request.prompt[0]!)).toContain(SIDE_WAITING_NOTE)
+    expect(result).toEqual({ kind: 'error', text: '/side requires a question: /side <question>' })
+    expect(subagents.startContinuable).not.toHaveBeenCalled()
   })
 
   it('lists children of the current session through /side list', async () => {
@@ -321,7 +325,7 @@ describe('text helpers', () => {
 describe('plugin wiring', () => {
   it('exports the conventional plugin shape', () => {
     expect(name).toBe('dsh-sidechain')
-    expect(inject).toEqual(['subagents'])
+    expect(inject).toEqual(['agents', 'subagents'])
     expect(Config).toBeDefined()
   })
 
@@ -329,6 +333,7 @@ describe('plugin wiring', () => {
     const registered: CommandDefinition[] = []
     const fakeCtx = {
       subagents: makeHarness().subagents,
+      agents: { list: () => [] },
       on: vi.fn(() => () => {}),
       inject: (_deps: string[], callback: (inner: { commands: { register: (d: CommandDefinition) => void } }) => void) => {
         callback({ commands: { register: definition => { registered.push(definition) } } })
@@ -344,6 +349,7 @@ describe('plugin wiring', () => {
     const registered: CommandDefinition[] = []
     const fakeCtx = {
       subagents: harness.subagents,
+      agents: { list: () => [] },
       on: vi.fn(() => () => {}),
       inject: (_deps: string[], callback: (inner: { commands: { register: (d: CommandDefinition) => void } }) => void) => {
         callback({ commands: { register: definition => { registered.push(definition) } } })

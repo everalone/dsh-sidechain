@@ -4,7 +4,47 @@
 
 import { describe, expect, it } from 'vitest'
 import type { TranscriptRow } from '../src/client/sidechain-view'
-import { lastActivity, salientToolArg } from '../src/client/sidechain-activity'
+import { lastActivity, readActivityRound, salientToolArg } from '../src/client/sidechain-activity'
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+describe('readActivityRound', () => {
+  it('settles only after every child read finishes', async () => {
+    const first = deferred<string | null>()
+    const second = deferred<string | null>()
+    const published: string[] = []
+    let settled = false
+    const round = readActivityRound(
+      ['first', 'second'],
+      row => row === 'first' ? first.promise : second.promise,
+      (_row, line) => { published.push(line) },
+    ).then(() => { settled = true })
+
+    first.resolve('one')
+    await first.promise
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    second.resolve('two')
+    await round
+    expect(settled).toBe(true)
+    expect(published).toEqual(['one', 'two'])
+  })
+
+  it('contains one failed child read and still publishes successful siblings', async () => {
+    const published: string[] = []
+    await expect(readActivityRound(
+      ['failed', 'ok'],
+      row => row === 'failed' ? Promise.reject(new Error('offline')) : Promise.resolve('ready'),
+      (row, line) => { published.push(`${row}:${line}`) },
+    )).resolves.toBeUndefined()
+    expect(published).toEqual(['ok:ready'])
+  })
+})
 
 describe('salientToolArg', () => {
   it('picks the per-tool priority field', () => {

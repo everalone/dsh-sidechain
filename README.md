@@ -12,7 +12,6 @@ DSH 侧会话插件：在**临时 fork** 的独立会话中执行任务——侧
 | 命令 | 行为 |
 |---|---|
 | `/side <问题>` | 创建可续聊的命名侧线程（持续性） |
-| `/side` | 创建空侧线程（等待你的第一个问题） |
 | `/side list` | 列出本会话的全部直接子代理 |
 | `/btw <问题>` | 一次性侧问：命令立即返回，答案在侧链面板查看 |
 
@@ -51,7 +50,7 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 ## 使用
 
 - `/side 调研一下 session-query 的 FTS 索引` —— 持续性侧会话：创建可续聊的命名侧线程，侧线程在后台持续工作，对话显示在右侧链面板，主会话保持不变
-- `/side` —— 创建空侧线程（等待你的第一个问题）
+- `/side 帮我分析这段实现` —— 创建可持续追问的侧线程
 - `/side list` —— 列出本会话的全部直接子代理
 - `/btw 这个目录下哪个文件最大？` —— 一次性侧问：命令立即返回（主会话不阻塞），答案在右侧链面板流式查看；如需多轮，请用 `/side`
 
@@ -72,8 +71,8 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 ## 主会话隔离
 
 - 侧会话的对话内容（消息/工具/回答）只写入**子会话自己的日志**，不进入主会话的模型上下文（`deriveMessages` 不包含子会话事件）
-- 主会话历史里只有两条命令卡片（`Side conversation started: <uuid>.` / `BTW question started: <uuid>.`）；`/btw` 配置了 `recordInput: false`，问题正文不会持久化进主会话日志
-- 平台会在子代理结算时向父会话投递结算通知；本插件通过 `agent/pre-step` 过滤器**静默自家子代理的结算通知**（子代理 id 注册表持久化在 `$DSH_HOME/sidechain-children.json`，重启后依然生效），主会话不会被唤醒、不会产生多余回复
+- 主会话历史里只有两条命令卡片（`Side conversation started: <uuid>.` / `BTW question started: <uuid>.`）；两个命令都配置了 `recordInput: false`，问题正文不会持久化进主会话日志
+- 平台会在子代理结算时向父会话投递结算通知；本插件在父代理的 inbox 入口前**静默自家子代理的结算通知**（子代理 id 注册表持久化在 `$DSH_HOME/sidechain-children.json`，重启后依然生效），因此通知、空 turn 和回答都不会写入主会话日志
 
 ## 验证
 
@@ -85,6 +84,6 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 ## 已知限制
 
 - fork 只继承父会话**已完成回合**；进行中的回合不包含。
-- 空 `/side`（不带问题）会先消耗一次模型调用产出等待语——宿主没有「只创建不提交 prompt」的能力，空线程的「等待你的第一个问题」只能作为一次真实回合实现。
+- `/side` 必须带首个问题；宿主没有「只创建不提交 prompt」的能力，因此插件不会用伪造的等待消息浪费一次模型调用。
 - `/btw` 是一次性运行，无后续轮次；多轮侧聊请用 `/side`。
 - `/side list` 列出的是本会话全部直接子代理（含平台/模型委派的），不限于侧会话。

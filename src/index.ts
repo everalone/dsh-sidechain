@@ -16,12 +16,12 @@ import z from 'schemastery'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { createSidechainCommands } from './commands.ts'
 import { SIDE_PERSONA } from './prompts.ts'
-import { loadSideChildren, registerSettlementSilence } from './settle-silence.ts'
+import { createSettlementSilence } from './settle-silence.ts'
 import type { SideDeps } from './side.ts'
 
 export const name = 'dsh-sidechain'
 
-export const inject = ['subagents']
+export const inject = ['agents', 'subagents']
 
 /** Plugin config: deployment-varying behavior, validated from cordis.yml. */
 export interface Config {
@@ -49,17 +49,13 @@ export function apply(ctx: Context, config: Config): () => void {
     ...(config.persona === '' ? {} : { persona: config.persona }),
     ...(toolFilter === undefined ? {} : { toolFilter }),
   }
+  const settlementSilence = createSettlementSilence(ctx)
   // Commands are an optional surface: without a command registry the plugin
   // still loads harmlessly in minimal deployments.
   ctx.inject(['commands'], (commandCtx) => {
-    for (const definition of createSidechainCommands(ctx.subagents, deps)) {
+    for (const definition of createSidechainCommands(ctx.subagents, deps, settlementSilence)) {
       commandCtx.commands.register(definition)
     }
   })
-  // Side settlements must not wake the parent into a main-session reply —
-  // their conversations are viewed in the panel. The child-id registry is
-  // reloaded from disk (children created before a restart stay recognized),
-  // and the listener is a fiber effect: hot unload removes it with the plugin.
-  loadSideChildren()
-  return registerSettlementSilence(ctx)
+  return () => { settlementSilence.dispose() }
 }

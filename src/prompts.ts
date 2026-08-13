@@ -33,10 +33,6 @@ Sub-agents are off-limits in this side conversation: do not interact with any ex
 
 You may perform non-mutating inspection, including reading or searching files and running checks that do not alter repo-tracked files.`
 
-/** Line appended to the boundary when a side conversation starts without a question. */
-export const SIDE_WAITING_NOTE =
-  'This side conversation was just created; wait for the user\'s first question.'
-
 /**
  * The mode declaration carried INSIDE the boundary message (after its first
  * sentence, so the message still opens with `Side conversation boundary` and

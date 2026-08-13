@@ -1,50 +1,20 @@
 /**
- * Command card for `/side` and `/btw` (browser half): renders a compact row
- * and, once the command settles successfully, reveals the sidechain panel
- * with the created side conversation selected — its transcript renders in the
- * right sidebar while the main session keeps running untouched. The reveal
- * fires exactly once per live settle: a card re-mounted from replay history
- * (reopening the session, a page reload) already observes the settled outcome
- * and must not pop the panel open.
+ * Command cards for `/side` and `/btw` (browser half). Live child discovery
+ * is owned by the always-mounted panel host, not
+ * the card: blank sessions deliberately do not render chat rows, and fast
+ * commands may settle before a row mounts.
  */
 
-import { useEffect, useRef } from 'react'
 import type { CommandNode, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 
-/** Business face injected by the slot registration (per session scope). */
-export interface SideCommandCardInjected {
-  /** Reveal the panel with the new child selected for the embedded view. */
-  revealPanel(childSessionId: SessionId): void
-}
-
-/** Composed props: the render site's owner ({ node }) plus the inject share. */
-export interface SideCommandCardProps extends SideCommandCardInjected {
+/** Props supplied by the keyed command row. */
+export interface SideCommandCardProps {
   node: CommandNode
 }
 
 /** Command key → child mode carried by the host's success text marker. */
 export type SideCommandKind = 'side' | 'btw'
-
-/**
- * The outcome state a card first observes at mount: `pending` while the
- * command is running, `settled` when it already carried a final outcome
- * (success or error) — which is what replaying history mounts look like.
- */
-export type FirstOutcome = 'pending' | 'settled'
-
-/**
- * Whether the card should reveal its child: exactly the live
- * running→success transition. A mount whose first observation is `settled`
- * is history replay (reopening the session, a page reload) and must not
- * pop the panel open.
- * @param first - the outcome state observed at mount.
- * @param outcome - the command's current outcome.
- * @returns whether to reveal the child conversation.
- */
-export function shouldAutoJump(first: FirstOutcome | null, outcome: CommandNode['outcome']): boolean {
-  return first === 'pending' && outcome?.kind === 'success'
-}
 
 /**
  * Resolve the created child session id from a settled command node, or
@@ -60,25 +30,43 @@ export function resolveChildSessionId(node: CommandNode, kind: SideCommandKind):
   return pattern.exec(text)?.[1] as SessionId | undefined
 }
 
-/** The command card: minimal row text plus one-shot panel reveal on success. */
-export function SideCommandCard({ node, revealPanel }: SideCommandCardProps): JSX.Element {
-  const revealedRef = useRef(false)
-  const firstOutcomeRef = useRef<FirstOutcome | null>(null)
-  const kind: SideCommandKind = node.name === 'btw' ? 'btw' : 'side'
-  useEffect(() => {
-    // Record the mount-time outcome once: `pending` means the card witnessed
-    // the command running (a live settle follows), `settled` means this mount
-    // replayed a finished command and must never pop the panel open.
-    if (firstOutcomeRef.current === null) {
-      firstOutcomeRef.current = node.outcome === null ? 'pending' : 'settled'
-    }
-    if (revealedRef.current || !shouldAutoJump(firstOutcomeRef.current, node.outcome)) return
-    const childId = resolveChildSessionId(node, kind)
-    if (childId === undefined) return
-    revealedRef.current = true
-    revealPanel(childId)
-  }, [node, kind, revealPanel])
+/** Last resolved child id for each observed sidechain command. */
+export type ObservedSideCommands = ReadonlyMap<CommandNode['commandId'], SessionId | undefined>
 
+/**
+ * Fold one command-node snapshot into the observer state.
+ *
+ * The first snapshot is a replay baseline and emits nothing. Later snapshots
+ * emit a child when a post-mount command appears already settled or an
+ * observed pending command settles. The mount timestamp excludes late
+ * history hydration; recording the resolved id makes repeats idempotent.
+ */
+export function observeCreatedChildren(
+  previous: ObservedSideCommands | undefined,
+  nodes: readonly CommandNode[],
+  startedAt: number,
+): { known: ObservedSideCommands; children: readonly SessionId[] } {
+  const known = new Map(previous)
+  const children: SessionId[] = []
+  for (const node of nodes) {
+    if (node.name !== 'side' && node.name !== 'btw') continue
+    const child = resolveChildSessionId(node, node.name)
+    if (
+      previous !== undefined
+      && node.time >= startedAt
+      && child !== undefined
+      && previous.get(node.commandId) !== child
+    ) {
+      children.push(child)
+    }
+    known.set(node.commandId, child)
+  }
+  return { known, children }
+}
+
+/** The command card is presentation only; the panel host owns live discovery. */
+export function SideCommandCard({ node }: SideCommandCardProps): JSX.Element {
+  const kind: SideCommandKind = node.name === 'btw' ? 'btw' : 'side'
   const outcome = node.outcome
   const label = outcome === null
     ? '…'

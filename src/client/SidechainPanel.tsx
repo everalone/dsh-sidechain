@@ -30,8 +30,9 @@
  * runtime's session staging. Polling keeps the panel a pure RPC consumer.
  *
  * The visibility + selection store is module-scoped (`panel-state.ts`),
- * shared with the `/side` / `/btw` cards, which reveal the panel and select
- * the new child on a live settle.
+ * shared by the composer-mounted panel host and the header toggle. The host
+ * discovers successful live `/side` and `/btw` commands even when blank
+ * session chrome suppresses the command cards.
  */
 
 import {
@@ -39,7 +40,7 @@ import {
   type CSSProperties, type PointerEvent as ReactPointerEvent,
 } from 'react'
 import type {
-  SessionId, SessionListState, SessionSummary, SubagentAddress,
+  CommandNode, SessionId, SessionListState, SessionSummary, SubagentAddress,
   SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
@@ -48,14 +49,16 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
-  readPanelWidth, selectChild, selectedChildId, subscribeSidechainPanel,
+  readPanelWidth, revealChild, selectChild, selectedChildId, subscribeSidechainPanel,
   toggleSidechainPanel, writePanelWidth,
 } from './panel-state.ts'
+import { observeCreatedChildren, type ObservedSideCommands } from './SideCommandCard.tsx'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
+import { readActivityRound } from './sidechain-activity.ts'
 import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
 import type { TranscriptRow, ToolDetail } from './sidechain-view.ts'
 
@@ -80,8 +83,13 @@ export interface SidechainPanelInjected {
 
 /** Full props: session standard kit + the inject share + the locale seat. */
 export type SidechainPanelProps =
-  PropsRuntime<'conversation.session.header.actions'>
+  PropsRuntime<'conversation.input.dock'>
   & SidechainPanelInjected
+  & PropsLocale<typeof NS>
+
+/** Header-only panel toggle; the panel host itself lives in the input dock. */
+export type SidechainPanelToggleProps =
+  PropsRuntime<'conversation.session.header.actions'>
   & PropsLocale<typeof NS>
 
 /** One rendered catalog row, label resolved, diagnostics kept apart. */
@@ -453,14 +461,39 @@ const LIVE_POLL_INTERVAL_MS = 1200
 const ACTIVITY_POLL_INTERVAL_MS = 3000
 
 /**
- * The header action: a toggle button plus, while open, the floating right
- * panel. The panel shows the catalog list, or — once a child is selected —
- * the child's embedded conversation (transcript + composer for continuable
+ * Header action for manually opening the sidechain catalog. Keeping this
+ * separate from the panel host lets blank sessions mount the host even while
+ * their header chrome is intentionally absent.
+ */
+export function SidechainPanelToggle({ sessionId, useSessions, t }: SidechainPanelToggleProps): JSX.Element {
+  const [open, setOpen] = useState(isSidechainPanelOpen)
+  useEffect(() => subscribeSidechainPanel(() => { setOpen(isSidechainPanelOpen()) }), [])
+  const catalog = useSessions(state => state.subagentsByParent[sessionId])
+  const summaries = useSessions(state => state.byId)
+  const running = runningCount(sidechainRows(catalog, summaries))
+  return (
+    <button
+      type="button"
+      style={{ ...styles.toggle, ...(open ? styles.toggleActive : {}) }}
+      title={t('panel.toggle')}
+      aria-label={t('panel.toggle')}
+      aria-pressed={open}
+      onClick={toggleSidechainPanel}
+    >
+      <IconBranchOutline16 />
+      {running > 0 && <span style={styles.badge}>{running}</span>}
+    </button>
+  )
+}
+
+/**
+ * The composer-mounted floating right panel. It shows the catalog list or,
+ * once selected, the child's embedded conversation (transcript + composer for continuable
  * threads); the main session never switches. Arming the catalog happens on
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
+  sessionId, useSession, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -468,6 +501,35 @@ export function SidechainPanel({
     setOpen(isSidechainPanelOpen())
     setSelected(selectedChildId())
   }), [])
+
+  // This host remains mounted in the blank-session composer, where command
+  // rows and the header do not exist. Seed replayed commands, then reveal only
+  // children created or settled after this session observer mounted.
+  const chatNodes = useSession(snapshot => snapshot.chat.nodes.values())
+  const commands = useMemo(() => (chatNodes as readonly ChatNode[])
+    .filter((node): node is ChatNode<'command'> => node.kind === 'command')
+    .map((node): CommandNode => node.data), [chatNodes])
+  const observedRef = useRef<{
+    sessionId: SessionId
+    startedAt: number
+    known: ObservedSideCommands | undefined
+  }>({
+    sessionId,
+    startedAt: Date.now(),
+    known: undefined,
+  })
+  useEffect(() => {
+    if (observedRef.current.sessionId !== sessionId) {
+      observedRef.current = { sessionId, startedAt: Date.now(), known: undefined }
+    }
+    const observed = observeCreatedChildren(
+      observedRef.current.known,
+      commands,
+      observedRef.current.startedAt,
+    )
+    observedRef.current.known = observed.known
+    for (const child of observed.children) revealChild(child)
+  }, [commands, sessionId])
 
   const catalogs = useSessions(state => state.subagentsByParent)
   const summaries = useSessions(state => state.byId)
@@ -691,20 +753,20 @@ export function SidechainPanel({
     if (activityInFlight.current) return
     const { readActivity } = actionsRef.current
     activityInFlight.current = true
-    const settle = (): void => { activityInFlight.current = false }
-    for (const row of targets) {
-      const address: SubagentAddress = {
-        parentSessionId: sessionIdRef.current,
-        childSessionId: row.id,
-        mode: row.mode,
-      }
+    const round = targets.map(row => {
       const epoch = (activityEpoch.current.get(row.id) ?? 0) + 1
       activityEpoch.current.set(row.id, epoch)
-      void readActivity(address).then((line) => {
-        if (activityEpoch.current.get(row.id) !== epoch || line === null) return
+      return { row, epoch }
+    })
+    void readActivityRound(round, ({ row }) => readActivity({
+      parentSessionId: sessionIdRef.current,
+      childSessionId: row.id,
+      mode: row.mode,
+    }), ({ row, epoch }, line) => {
+      if (activityEpoch.current.get(row.id) === epoch) {
         setActivity(previous => previous[row.id] === line ? previous : { ...previous, [row.id]: line })
-      }).finally(settle)
-    }
+      }
+    }).finally(() => { activityInFlight.current = false })
   }, [])
   useEffect(() => {
     const timer = setInterval(() => { pollActivity() }, ACTIVITY_POLL_INTERVAL_MS)
@@ -806,17 +868,6 @@ export function SidechainPanel({
 
   return (
     <>
-      <button
-        type="button"
-        style={{ ...styles.toggle, ...(open ? styles.toggleActive : {}) }}
-        title={t('panel.toggle')}
-        aria-label={t('panel.toggle')}
-        aria-pressed={open}
-        onClick={toggleSidechainPanel}
-      >
-        <IconBranchOutline16 />
-        {running > 0 && <span style={styles.badge}>{running}</span>}
-      </button>
       {open && (
         <aside ref={panelRef} style={{ ...styles.panel, width }} role="complementary" aria-label={t('panel.title')}>
           <div

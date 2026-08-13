@@ -10,6 +10,18 @@
 
 import type { TranscriptRow } from './sidechain-view.ts'
 
+/** Read one activity round and publish successful non-empty lines after containing sibling failures. */
+export async function readActivityRound<Row>(
+  rows: readonly Row[],
+  read: (row: Row) => Promise<string | null>,
+  publish: (row: Row, line: string) => void,
+): Promise<void> {
+  await Promise.allSettled(rows.map(async row => {
+    const line = await read(row)
+    if (line !== null) publish(row, line)
+  }))
+}
+
 /** Argument fields that summarize each known tool best (first-wins priority). */
 const TOOL_ARG_FIELDS: Readonly<Record<string, string>> = {
   bash: 'command',
