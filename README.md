@@ -46,6 +46,8 @@ dsh plugin --profile web add link:/path/to/dsh-sidechain
 | `persona` | 内置侧会话 persona | 侧会话行为约束（只读探索、不主动改文件、禁子代理）；空字符串 = 不覆盖部署 persona |
 | `readOnlyTools` | 无 | 侧会话工具 allow-list（如 `["read","grep","glob"]`）；缺省不限制 |
 
+> **热卸载与重挂**：从 `cordis.patch.yml` 移除本插件的配置行并保存即卸载，无需重启——服务端即时生效（`/side`、`/btw` 从命令列表消失）；客户端清单同步更新，已打开的页面刷新后侧链面板随之移除（刷新前命令已不可用）。把配置行加回并保存即重挂，命令即时恢复，页面刷新后面板恢复。插件代码更新（`lib/`）不在此列，仍需重启 `dsh web` 并刷新页面。
+
 ## 使用
 
 - `/side 调研一下 session-query 的 FTS 索引` —— 持续性侧会话：创建可续聊的命名侧线程，侧线程在后台持续工作，对话显示在右侧链面板，主会话保持不变
