@@ -621,10 +621,17 @@ export function SidechainPanel({
   )
   const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
   const fetchEpoch = useRef(0)
+  // Single-flight guard: a poll tick while a fetch is still in flight is
+  // skipped (the poll interval is shorter than heavy first reads; piling up
+  // overlapping transcript requests would starve the server).
+  const fetchInFlight = useRef(false)
   const request = useCallback((target: SubagentAddress, showLoading: boolean) => {
+    if (fetchInFlight.current && !showLoading) return
     const epoch = ++fetchEpoch.current
     if (showLoading) setTranscriptState('loading')
+    fetchInFlight.current = true
     void actionsRef.current.readTranscript(target).then((result) => {
+      fetchInFlight.current = false
       if (epoch !== fetchEpoch.current) return
       setTranscript(result?.rows ?? null)
       // An initial fetch replaces the vocabulary; later polls union it, so
@@ -674,11 +681,17 @@ export function SidechainPanel({
   sessionIdRef.current = sessionId
   const [activity, setActivity] = useState<Readonly<Record<SessionId, string>>>({})
   const activityEpoch = useRef(new Map<string, number>())
+  // Single-flight guard for the whole activity round (one round may fan out
+  // to several running children; a slow round must not overlap itself).
+  const activityInFlight = useRef(false)
   const pollActivity = useCallback(() => {
     if (!openRef.current || document.hidden) return
     const targets = runningRowsRef.current
     if (targets.length === 0) return
+    if (activityInFlight.current) return
     const { readActivity } = actionsRef.current
+    activityInFlight.current = true
+    const settle = (): void => { activityInFlight.current = false }
     for (const row of targets) {
       const address: SubagentAddress = {
         parentSessionId: sessionIdRef.current,
@@ -690,7 +703,7 @@ export function SidechainPanel({
       void readActivity(address).then((line) => {
         if (activityEpoch.current.get(row.id) !== epoch || line === null) return
         setActivity(previous => previous[row.id] === line ? previous : { ...previous, [row.id]: line })
-      })
+      }).finally(settle)
     }
   }, [])
   useEffect(() => {

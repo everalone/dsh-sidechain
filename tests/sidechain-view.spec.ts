@@ -3,11 +3,12 @@
  * row mapping, tool call/result pairing, and the history/prompt RPC helpers.
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
 import {
-  blockText, fetchTranscript, mergeProduced, producedPaths, resultViewSummary, sendPrompt, transcriptRows,
+  blockText, fetchTranscript, mergeProduced, producedPaths, resetSeedBoundaryCache,
+  resultViewSummary, sendPrompt, transcriptRows,
 } from '../src/client/sidechain-view'
 import type { TranscriptEntry } from '../src/client/sidechain-view'
 
@@ -238,6 +239,11 @@ describe('mergeProduced', () => {
 })
 
 describe('fetchTranscript', () => {
+  beforeEach(() => {
+    // The seed-boundary cache is module-scoped; each test starts clean.
+    resetSeedBoundaryCache()
+  })
+
   it('maps the seed-cut history tail to rows via session.history', async () => {
     const history = vi.fn(() => Promise.resolve({
       result: {
@@ -329,6 +335,61 @@ describe('fetchTranscript', () => {
       rows: [
         { kind: 'user', seq: 90, text: '旧问' },
         { kind: 'user', seq: 92, text: '问' },
+      ],
+      produced: [],
+    })
+  })
+
+  it('reuses the cached seed boundary — later reads fetch one page only', async () => {
+    // First read: the walk locates the boundary (page 2 has the end-seed).
+    const history = vi.fn()
+      .mockResolvedValueOnce({
+        result: { ok: true, value: {
+          events: [
+            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
+            { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '旧答' }] } }) },
+          ],
+          hasMore: false,
+        } },
+      })
+      .mockResolvedValueOnce({
+        result: { ok: true, value: {
+          events: [
+            { event: event('session/end-seed', 80, {}) },
+            { event: event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }) },
+          ],
+          hasMore: false,
+        } },
+      })
+      // Second read (cached): the tail window has no end-seed, but the cached
+      // boundary supplies the cut — one page, no walk.
+      .mockResolvedValueOnce({
+        result: { ok: true, value: {
+          events: [
+            { event: event('user/message', 92, { content: [{ type: 'text', text: '新问' }] }) },
+            { event: event('assistant/message', 93, { message: { content: [{ type: 'text', text: '新答' }] } }) },
+          ],
+          hasMore: false,
+        } },
+      })
+    const sessions = { history } as never
+    const first = await fetchTranscript(sessions, ADDRESS)
+    expect(first).toEqual({
+      rows: [
+        { kind: 'user', seq: 90, text: '旧问' },
+        { kind: 'assistant', seq: 91, text: '旧答' },
+      ],
+      produced: [],
+    })
+    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 90 })
+    // Cached: exactly one fetch, no beforeSeq walk.
+    const second = await fetchTranscript(sessions, ADDRESS)
+    expect(history).toHaveBeenCalledTimes(3)
+    expect(history).toHaveBeenNthCalledWith(3, { sessionId: CHILD, maxMessages: 8 })
+    expect(second).toEqual({
+      rows: [
+        { kind: 'user', seq: 92, text: '新问' },
+        { kind: 'assistant', seq: 93, text: '新答' },
       ],
       produced: [],
     })

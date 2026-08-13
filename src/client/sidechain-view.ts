@@ -361,11 +361,32 @@ export async function fetchActivity(
 }
 
 /**
+ * Per-child seed-boundary cache: the seq of the child's last
+ * `session/end-seed` marker. Once the first walk locates it, every later read
+ * needs at most ONE page — either the page contains the end-seed and the
+ * normal cut applies, or the page is entirely the child's own content and the
+ * cached boundary supplies the cut (a seq filter no-op). The dense inherited
+ * seed is never re-downloaded after the first walk.
+ */
+const seedBoundaryCache = new Map<string, number>()
+
+/** Test seam: drop all cached seed boundaries (fresh module state). */
+export function resetSeedBoundaryCache(): void {
+  seedBoundaryCache.clear()
+}
+
+/**
  * Page a child's log backwards from the tail in small windows until a window
  * contains the fork seed's closing marker (`session/end-seed`), then return
- * everything after that marker — the child's own conversation only. Overlap
- * between pages is deduped by sequence, so an inclusive `beforeSeq` contract
- * on the host is harmless.
+ * everything after that marker — the child's own conversation only.
+ *
+ * The host pages strictly backward (`beforeSeq` is an exclusive upper bound),
+ * so there is no "start after the boundary" fetch: the first read of a child
+ * walks back until a window contains the newest end-seed (usually the first
+ * window; a long child's own conversation may need one more). The boundary
+ * seq is then cached — later reads (the live polls) fetch one tail window and
+ * cut with the cache. Overlap between pages is deduped by sequence, so an
+ * inclusive `beforeSeq` contract on the host is harmless.
  * @param sessions - the api client's sessions surface.
  * @param childSessionId - the child whose own conversation to read.
  * @param pageMessages - messages per backward page.
@@ -379,8 +400,10 @@ async function fetchSeedCutEntries(
   pageMessages: number,
   pageCap: number,
 ): Promise<readonly TranscriptEntry[] | null> {
+  const cachedBoundary = seedBoundaryCache.get(childSessionId)
   const collected: TranscriptEntry[] = []
   let beforeSeq: number | undefined
+  let boundarySeq = cachedBoundary
   try {
     for (let page = 0; page < pageCap; page++) {
       const response = await sessions.history({
@@ -397,7 +420,17 @@ async function fetchSeedCutEntries(
         : events.filter(entry => entry.event.seq < olderThan)
       const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
       if (seedEnd >= 0) {
+        // The newest end-seed in this window is the operative boundary.
+        boundarySeq = fresh[seedEnd]!.event.seq
+        seedBoundaryCache.set(childSessionId, boundarySeq)
         collected.unshift(...fresh.slice(seedEnd + 1))
+        break
+      }
+      if (boundarySeq !== undefined) {
+        // Cached boundary + a window without the marker: the window is
+        // entirely the child's own content — the seq filter is a safe no-op.
+        const boundary = boundarySeq
+        collected.unshift(...fresh.filter(entry => entry.event.seq > boundary))
         break
       }
       collected.unshift(...fresh)
