@@ -23,7 +23,7 @@ import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/d
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
-import { contextProvenance } from '@deepseek-ai/dsh-client-runtime/src/client/sessions/context-provenance.ts'
+import { contextProvenance } from '@deepseek-ai/dsh-client-runtime/client'
 import { lastActivity } from './sidechain-activity.ts'
 
 /**

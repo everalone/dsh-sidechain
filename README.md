@@ -2,6 +2,8 @@
 
 DSH 侧会话插件。它通过 fork 当前会话创建独立子会话，让用户在不中断主线程的情况下发起一次性问题或持续对话。
 
+当前版本适配公开版 DSH rc.5（npm `0.0.1-rc.5`，源码提交 `47f94385`）。
+
 | 命令 | 用途 |
 |---|---|
 | `/btw <问题>` | 发起一次性侧问，适合快速确认信息 |
@@ -26,12 +28,10 @@ DSH 侧会话插件。它通过 fork 当前会话创建独立子会话，让用�
 ### 安装
 
 ```sh
-git clone https://github.com/dsh-external/dsh-sidechain.git
-cd dsh-sidechain
-pnpm install
-pnpm build
-dsh plugin --profile web add link:/path/to/dsh-sidechain
+dsh plugin --profile web add github:Buyi-wsgzg/dsh-sidechain
 ```
+
+pnpm 10 及以上首次安装会提示允许 Git 依赖执行 `prepare`。按命令输出把插件键加入 Web profile 的 `pnpm-workspace.yaml`，然后重新执行安装命令。
 
 插件会向 Web profile 添加以下配置：
 
@@ -134,4 +134,4 @@ pnpm install
 pnpm check
 ```
 
-`pnpm check` 依次执行类型检查、测试和构建。开发依赖通过 `link:` 指向本机的 DSH checkout，移动仓库后需要相应更新这些路径。
+`pnpm check` 依次执行类型检查、测试和构建。开发依赖固定到公开版 DSH rc.5，不需要本机存在 DSH 源码 checkout。

@@ -14,8 +14,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { Context } from 'cordis'
 import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 
 type DeliveryMethod = 'followup' | 'steer' | 'inject'

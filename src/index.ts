@@ -11,8 +11,8 @@
  * streams into the sidechain panel. Neither command blocks the main session.
  */
 
-import type { Context } from 'cordis'
-import z from 'schemastery'
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { createSidechainCommands } from './commands.ts'
 import { SIDE_PERSONA } from './prompts.ts'
