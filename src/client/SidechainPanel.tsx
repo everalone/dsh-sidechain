@@ -1064,7 +1064,7 @@ export function SidechainPanel({
                   </div>
                 )}
                 {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
-                  <div style={styles.notice}>{t('view.empty')}</div>
+                  <div style={styles.notice}>{selectedRunning ? t('view.waiting') : t('view.empty')}</div>
                 )}
                 {(transcript ?? []).map((row, index, all) => (
                   <TranscriptRowView

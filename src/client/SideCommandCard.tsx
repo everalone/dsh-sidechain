@@ -199,6 +199,11 @@ export function SideCommandCard({ node, sessionId, useSessions, readChildTranscr
       <div style={{ overflowX: 'auto' }}>
         <MarkdownText text={label} streaming={false} />
       </div>
+      {kind === 'btw' && rows !== null && rows.length === 0 && childRunning && (
+        <div style={{ marginTop: 8, color: 'var(--ds-color-text-2, #4e5969)', fontSize: 12 }}>
+          …
+        </div>
+      )}
       {kind === 'btw' && rows !== null && rows.length > 0 && (
         <BtwTranscript rows={rows} running={childRunning} />
       )}
