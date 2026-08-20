@@ -1101,7 +1101,13 @@ export function SidechainPanel({
           ) : (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div ref={transcriptRef} style={styles.transcript} onScroll={onTranscriptScroll}>
-                {transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
+                {/* While the child is running and has not produced any output
+                    yet (no assistant/reasoning/tool rows), keep a clear waiting
+                    hint instead of an empty or merely "loading" panel. */}
+                {selectedRunning && !transcript?.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool') && (
+                  <div style={styles.notice}>{t('view.waiting')}</div>
+                )}
+                {!selectedRunning && transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
                 {transcriptState === 'error' && (
                   <div style={styles.error}>
                     <span>{t('view.error')}</span>
@@ -1116,12 +1122,6 @@ export function SidechainPanel({
                       {t('panel.retry')}
                     </button>
                   </div>
-                )}
-                {transcriptState === 'ready' && transcript !== null && (
-                  selectedRunning
-                  && !transcript.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool')
-                ) && (
-                  <div style={styles.notice}>{t('view.waiting')}</div>
                 )}
                 {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && !selectedRunning && (
                   <div style={styles.notice}>{t('view.empty')}</div>
