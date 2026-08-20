@@ -169,6 +169,9 @@ const C = {
   danger: 'var(--ds-color-danger, #f53f3f)',
 } as const
 
+/** Side panel enter/exit animation duration (ms). */
+const PANEL_TRANSITION_MS = 240
+
 const styles: Record<string, CSSProperties> = {
   toggle: {
     display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -189,6 +192,7 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--ds-color-bg-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
     boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.12)', zIndex: 200,
     fontSize: 13, color: C.text1,
+    transition: `transform ${PANEL_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${PANEL_TRANSITION_MS}ms ease`,
   },
   resizer: {
     position: 'absolute', top: 0, bottom: 0, left: -6, width: 12,
@@ -588,6 +592,25 @@ export function SidechainPanel({
     setSelectedMode(selectedChildMode())
   }), [])
 
+  // Enter/exit animation: keep the panel mounted through its exit transition,
+  // then unmount only after the slide-out finishes.
+  const [mounted, setMounted] = useState(isSidechainPanelOpen)
+  const [entered, setEntered] = useState(false)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+    } else {
+      setEntered(false)
+      const timer = setTimeout(() => setMounted(false), PANEL_TRANSITION_MS)
+      return () => clearTimeout(timer)
+    }
+  }, [open])
+  useEffect(() => {
+    if (!mounted || !open) return
+    const raf = requestAnimationFrame(() => setEntered(true))
+    return () => cancelAnimationFrame(raf)
+  }, [mounted, open])
+
   // This host remains mounted in the blank-session composer, where command
   // rows and the header do not exist. Seed replayed commands, then reveal only
   // children created or settled after this session observer mounted.
@@ -974,10 +997,17 @@ export function SidechainPanel({
     || (catalog.state === 'loading' && rows.length === 0)
   const empty = catalog !== undefined && catalog.state === 'ready' && rows.length === 0
 
+  const panelTransform = entered ? 'translateX(0)' : 'translateX(100%)'
+  const panelOpacity = entered ? 1 : 0
   return (
     <>
-      {open && (
-        <aside ref={panelRef} style={{ ...styles.panel, width }} role="complementary" aria-label={t('panel.title')}>
+      {mounted && (
+        <aside
+          ref={panelRef}
+          style={{ ...styles.panel, width, transform: panelTransform, opacity: panelOpacity }}
+          role="complementary"
+          aria-label={t('panel.title')}
+        >
           <div
             style={styles.resizer}
             title={t('panel.resize')}
