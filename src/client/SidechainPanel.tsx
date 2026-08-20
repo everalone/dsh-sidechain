@@ -56,10 +56,10 @@ import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
-  readPanelWidth, revealChild, selectChild, selectedChildId, subscribeSidechainPanel,
+  readPanelWidth, revealChild, selectChild, selectedChildId, selectedChildMode, subscribeSidechainPanel,
   toggleSidechainPanel, writePanelWidth,
 } from './panel-state.ts'
-import { observeCreatedChildren, type ObservedSideCommands } from './SideCommandCard.tsx'
+import { observeCreatedChildren, resolveChildSessionId, type ObservedSideCommands } from './SideCommandCard.tsx'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { readActivityRound } from './sidechain-activity.ts'
 import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
@@ -581,9 +581,11 @@ export function SidechainPanel({
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
+  const [selectedMode, setSelectedMode] = useState(selectedChildMode)
   useEffect(() => subscribeSidechainPanel(() => {
     setOpen(isSidechainPanelOpen())
     setSelected(selectedChildId())
+    setSelectedMode(selectedChildMode())
   }), [])
 
   // This host remains mounted in the blank-session composer, where command
@@ -612,7 +614,20 @@ export function SidechainPanel({
       observedRef.current.startedAt,
     )
     observedRef.current.known = observed.known
-    for (const child of observed.children) revealChild(child)
+    for (const child of observed.children) {
+      // The command's own kind tells us the child's mode even before the
+      // catalog has placed it — so the panel can start reading the child
+      // immediately instead of waiting for a manual refresh.
+      const owner = commands.find(candidate => {
+        const name = candidate.name
+        return (name === 'side' || name === 'btw')
+          && resolveChildSessionId(candidate, name) === child
+      })
+      const mode = owner !== undefined
+        ? (owner.name === 'btw' ? 'one-shot' : 'continuable')
+        : undefined
+      revealChild(child, mode)
+    }
   }, [commands, sessionId])
 
   const catalogs = useSessions(state => state.subagentsByParent)
@@ -728,20 +743,29 @@ export function SidechainPanel({
   }, [])
 
   // The selected child's durable address (stable while selection/catalog stay).
+  // Prefer the catalog's authoritative mode; when the catalog has not yet
+  // placed the freshly-created child, fall back to the mode we learned from
+  // its `/side` or `/btw` command so the panel can stream immediately.
   const address = useMemo<SubagentAddress | undefined>(() => {
     if (selected === undefined) return undefined
     const row = rows.find(candidate => candidate.kind === 'child' && candidate.id === selected)
-    return row?.kind === 'child'
-      ? { parentSessionId: sessionId, childSessionId: selected, mode: row.mode }
-      : undefined
-  }, [selected, rows, sessionId])
+    const mode = row?.kind === 'child' ? row.mode : selectedMode
+    return mode === undefined
+      ? undefined
+      : { parentSessionId: sessionId, childSessionId: selected, mode }
+  }, [selected, rows, selectedMode, sessionId])
 
   // The selected child's catalog row (its activity drives the live poll).
   const selectedRow = selected === undefined
     ? undefined
     : rows.find(candidate => candidate.id === selected)
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
-  const selectedRunning = selectedChild?.activity === 'running'
+  // A child we just created via /btw or /side may not have appeared in the
+  // catalog yet; treat it as running so the live poll and waiting hint engage
+  // until the catalog catches up.
+  const selectedRunning = selectedChild !== undefined
+    ? selectedChild.activity === 'running'
+    : selectedMode !== undefined
 
   // Stable key for the selected address (primitive — never churns with
   // unrelated list re-renders), plus refs the persistent poll reads.
