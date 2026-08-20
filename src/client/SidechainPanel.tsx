@@ -1101,10 +1101,11 @@ export function SidechainPanel({
           ) : (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div ref={transcriptRef} style={styles.transcript} onScroll={onTranscriptScroll}>
-                {/* While the child is running and has not produced any output
-                    yet (no assistant/reasoning/tool rows), keep a clear waiting
-                    hint instead of an empty or merely "loading" panel. */}
-                {selectedRunning && !transcript?.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool') && (
+                {/* Mirrors the main conversation's top turn-status: while the
+                    child is running, keep a "Deep diving..." hint pinned at the
+                    top across first-token, tool, and streaming phases. Copy is
+                    i18n-driven (view.waiting) so other plugins can override. */}
+                {selectedRunning && (
                   <div style={styles.notice}>{t('view.waiting')}</div>
                 )}
                 {!selectedRunning && transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
