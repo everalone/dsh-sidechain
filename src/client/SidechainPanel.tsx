@@ -1117,8 +1117,14 @@ export function SidechainPanel({
                     </button>
                   </div>
                 )}
-                {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
-                  <div style={styles.notice}>{selectedRunning ? t('view.waiting') : t('view.empty')}</div>
+                {transcriptState === 'ready' && transcript !== null && (
+                  selectedRunning
+                  && !transcript.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool')
+                ) && (
+                  <div style={styles.notice}>{t('view.waiting')}</div>
+                )}
+                {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && !selectedRunning && (
+                  <div style={styles.notice}>{t('view.empty')}</div>
                 )}
                 {(transcript ?? []).map((row, index, all) => (
                   <TranscriptRowView

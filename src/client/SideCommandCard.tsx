@@ -199,7 +199,8 @@ export function SideCommandCard({ node, sessionId, useSessions, readChildTranscr
       <div style={{ overflowX: 'auto' }}>
         <MarkdownText text={label} streaming={false} />
       </div>
-      {kind === 'btw' && rows !== null && rows.length === 0 && childRunning && (
+      {kind === 'btw' && rows !== null && childRunning
+        && !rows.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool') && (
         <div style={{ marginTop: 8, color: 'var(--ds-color-text-2, #4e5969)', fontSize: 12 }}>
           …
         </div>
