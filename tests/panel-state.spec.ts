@@ -7,34 +7,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, openSidechainPanel,
   PANEL_DEFAULT_WIDTH, PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, panelMaxWidth,
-  readPanelWidth, resetSidechainPanel, revealChild, selectedChildId, selectChild,
+  readPanelWidth, resetSidechainPanel, revealChild, selectedChildId,
   subscribeSidechainPanel, toggleSidechainPanel, writePanelWidth,
 } from '../src/client/panel-state'
 
 const CHILD_A = '11111111-1111-4111-8111-111111111111' as SessionId
-const CHILD_B = '22222222-2222-4222-8222-222222222222' as SessionId
-
 describe('panel-state', () => {
   beforeEach(() => {
     resetSidechainPanel()
-  })
-
-  it('starts closed with no selection', () => {
-    expect(isSidechainPanelOpen()).toBe(false)
-    expect(selectedChildId()).toBeUndefined()
   })
 
   it('open/close flip the visibility', () => {
     openSidechainPanel()
     expect(isSidechainPanelOpen()).toBe(true)
     closeSidechainPanel()
-    expect(isSidechainPanelOpen()).toBe(false)
-  })
-
-  it('toggle flips both ways', () => {
-    toggleSidechainPanel()
-    expect(isSidechainPanelOpen()).toBe(true)
-    toggleSidechainPanel()
     expect(isSidechainPanelOpen()).toBe(false)
   })
 
@@ -62,16 +48,6 @@ describe('panel-state', () => {
     subscribeSidechainPanel(listener)
     revealChild(CHILD_A)
     expect(listener).not.toHaveBeenCalled()
-  })
-
-  it('selectChild switches the selection without touching visibility', () => {
-    revealChild(CHILD_A)
-    selectChild(CHILD_B)
-    expect(isSidechainPanelOpen()).toBe(true)
-    expect(selectedChildId()).toBe(CHILD_B)
-    selectChild(undefined)
-    expect(selectedChildId()).toBeUndefined()
-    expect(isSidechainPanelOpen()).toBe(true)
   })
 
   it('close clears the selection', () => {

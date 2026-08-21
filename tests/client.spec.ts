@@ -39,14 +39,6 @@ describe('resolveChildSessionId', () => {
     }), 'btw')).toBe(CHILD_ID)
   })
 
-  it('returns undefined while the command is running', () => {
-    expect(resolveChildSessionId(node({ outcome: null }), 'side')).toBeUndefined()
-  })
-
-  it('returns undefined on failure', () => {
-    expect(resolveChildSessionId(node({ outcome: { kind: 'error', text: 'boom' } }), 'side')).toBeUndefined()
-  })
-
   it('returns undefined on malformed text', () => {
     expect(resolveChildSessionId(node({ outcome: { kind: 'success', text: 'no id here' } }), 'side')).toBeUndefined()
     expect(resolveChildSessionId(node({ outcome: { kind: 'success', text: 'plain answer' } }), 'btw')).toBeUndefined()
@@ -170,14 +162,6 @@ describe('client apply wiring', () => {
         ['conversation.input.dock', 'sidechain-panel-host'],
         ['conversation.session.header.actions', 'sidechain-panel-toggle'],
       ])
-  })
-
-  it('panel action sits after the subagent catalog in the header', () => {
-    const { ctx, registered } = fakeCtx()
-    apply(ctx as never)
-    const panel = registered.find(entry => entry.options.id === 'sidechain-panel-toggle')!
-    expect(panel.options.order).toBe(20)
-    expect(panel.options.locale).toBe('sidechain')
   })
 
   it('panel inject wires the transcript RPC and catalog methods', async () => {

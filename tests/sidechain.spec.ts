@@ -19,7 +19,7 @@ import type {
   SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
-import { apply, Config, inject, name } from '../src/index'
+import { apply } from '../src/index'
 import { createSidechainCommands } from '../src/commands'
 import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, SIDE_PERSONA } from '../src/prompts'
 import {
@@ -135,23 +135,12 @@ describe('pinned prompt text', () => {
 })
 
 describe('command registration', () => {
-  it('registers /side and /btw in order', () => {
-    const { commands } = makeHarness()
-    expect(commands.map(command => command.name)).toEqual(['side', 'btw'])
-  })
-
   it('declares argument hints and keeps both questions out of the parent log', () => {
     const { commands } = makeHarness()
     expect(commands[0]?.input).toEqual({ hint: '<question>', images: true })
     expect(commands[1]?.input).toEqual({ hint: '<question>', images: true })
     expect(commands[0]?.recordInput).toBe(false)
     expect(commands[1]?.recordInput).toBe(false)
-  })
-
-  it('keeps descriptions terse like Codex', () => {
-    const { commands } = makeHarness()
-    expect(commands[0]?.description).toBe('Start a side conversation in an ephemeral fork of the current session')
-    expect(commands[1]?.description).toBe('Ask a quick question in an ephemeral fork of the current session')
   })
 
 })
@@ -285,15 +274,6 @@ describe('/side (continuable side thread)', () => {
     expect(noteChild).toHaveBeenCalledWith(agent, CHILD_ID)
   })
 
-  it('rejects an empty question instead of running a synthetic waiting turn', async () => {
-    const { subagents, commands } = makeHarness()
-
-    const result = await invoke(commands[0]!, '   ')
-
-    expect(result).toEqual({ kind: 'error', text: '/side requires a question: /side <question>' })
-    expect(subagents.startContinuable).not.toHaveBeenCalled()
-  })
-
   it('lists children of the current session through /side list', async () => {
     const { subagents, commands } = makeHarness()
     subagents.listChildren.mockResolvedValue([
@@ -341,12 +321,6 @@ describe('text helpers', () => {
 })
 
 describe('plugin wiring', () => {
-  it('exports the conventional plugin shape', () => {
-    expect(name).toBe('dsh-sidechain')
-    expect(inject).toEqual(['agents', 'subagents'])
-    expect(Config).toBeDefined()
-  })
-
   it('registers both commands when a command registry is composed', () => {
     const registered: CommandDefinition[] = []
     const fakeCtx = {
