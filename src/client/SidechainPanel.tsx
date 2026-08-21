@@ -1101,13 +1101,6 @@ export function SidechainPanel({
           ) : (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div ref={transcriptRef} style={styles.transcript} onScroll={onTranscriptScroll}>
-                {/* Mirrors the main conversation's top turn-status: while the
-                    child is running, keep a "Deep diving..." hint pinned at the
-                    top across first-token, tool, and streaming phases. Copy is
-                    i18n-driven (view.waiting) so other plugins can override. */}
-                {selectedRunning && (
-                  <div style={styles.notice}>{t('view.waiting')}</div>
-                )}
                 {!selectedRunning && transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
                 {transcriptState === 'error' && (
                   <div style={styles.error}>
@@ -1137,6 +1130,17 @@ export function SidechainPanel({
                     t={t}
                   />
                 ))}
+                {/* Bottom-left waiting hint, DeepSeek blue, present while the
+                    child is running (i18n-driven copy via view.waiting). */}
+                {selectedRunning && (
+                  <div style={{
+                    marginTop: 8,
+                    color: 'var(--ds-color-primary, #4D6BFE)',
+                    textAlign: 'left',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                  }}>{t('view.waiting')}</div>
+                )}
               </div>
               {address.mode === 'one-shot' ? (
                 <div style={styles.readonly}>{t('view.readonly')}</div>
