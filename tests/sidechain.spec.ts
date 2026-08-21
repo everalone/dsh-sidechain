@@ -75,8 +75,9 @@ function invoke(
   command: CommandDefinition,
   rawInput: string,
   signal = new AbortController().signal,
+  attachments: readonly ContentBlock[] = [],
 ): ReturnType<NonNullable<CommandDefinition['handler']>> {
-  return command.handler({ commandId: 'cmd-test-1' as CommandId, agent, rawInput, signal } as CommandInvocation)
+  return command.handler({ commandId: 'cmd-test-1' as CommandId, agent, rawInput, attachments, signal } as CommandInvocation)
 }
 
 function textOf(block: ContentBlock): string {
@@ -141,8 +142,8 @@ describe('command registration', () => {
 
   it('declares argument hints and keeps both questions out of the parent log', () => {
     const { commands } = makeHarness()
-    expect(commands[0]?.input).toEqual({ hint: '<question>' })
-    expect(commands[1]?.input).toEqual({ hint: '<question>' })
+    expect(commands[0]?.input).toEqual({ hint: '<question>', images: true })
+    expect(commands[1]?.input).toEqual({ hint: '<question>', images: true })
     expect(commands[0]?.recordInput).toBe(false)
     expect(commands[1]?.recordInput).toBe(false)
   })
@@ -152,6 +153,7 @@ describe('command registration', () => {
     expect(commands[0]?.description).toBe('Start a side conversation in an ephemeral fork of the current session')
     expect(commands[1]?.description).toBe('Ask a quick question in an ephemeral fork of the current session')
   })
+
 })
 
 describe('/btw (non-blocking one-shot side question)', () => {
@@ -174,6 +176,22 @@ describe('/btw (non-blocking one-shot side question)', () => {
     expect(prompt).toContain(SIDE_BOUNDARY_PROMPT)
     expect(prompt).toContain('what is 6*7?')
     expect(noteChild).toHaveBeenCalledWith(agent, CHILD_ID)
+  })
+
+  it('forwards admitted image blocks into the child prompt', async () => {
+    const { subagents, commands } = makeHarness()
+    subagents.start.mockResolvedValue(runOf())
+    const image = {
+      type: 'image',
+      attachment: {
+        attachmentId: 'image-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1,
+      },
+    } as unknown as ContentBlock
+
+    await invoke(commands[1]!, 'describe this', new AbortController().signal, [image])
+
+    const request = subagents.start.mock.calls[0]![1] as SubagentStartRequest
+    expect(request.prompt).toEqual(expect.arrayContaining([image]))
   })
 
   it('resolves without awaiting the child result — the input stays free', async () => {

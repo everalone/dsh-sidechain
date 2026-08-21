@@ -63,7 +63,7 @@ import { observeCreatedChildren, type ObservedSideCommands } from './SideCommand
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { readActivityRound } from './sidechain-activity.ts'
 import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
-import type { TranscriptRow, ToolDetail } from './sidechain-view.ts'
+import type { TranscriptImage, TranscriptRow, ToolDetail } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
 export interface SidechainPanelInjected {
@@ -243,6 +243,11 @@ const styles: Record<string, CSSProperties> = {
   },
   transcript: { flex: 1, overflowY: 'auto', padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 },
   userRow: { alignSelf: 'flex-start', maxWidth: '100%' },
+  imageRow: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 },
+  image: {
+    display: 'block', width: 'min(100%, 280px)', maxHeight: 240, objectFit: 'contain',
+    borderRadius: 6, border: '1px solid var(--ds-color-border, #d7dce3)', background: C.surface2,
+  },
   userText: {
     padding: '6px 10px', borderRadius: 10,
     background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text1,
@@ -478,6 +483,25 @@ function TranscriptDisclosure({ row, streaming, t }: {
   )
 }
 
+function TranscriptImages({ images }: {
+  images: readonly TranscriptImage[]
+}): JSX.Element | null {
+  const visible = images.filter(image => image.url !== undefined)
+  if (visible.length === 0) return null
+  return (
+    <div style={styles.imageRow}>
+      {visible.map(image => (
+        <img
+          key={String(image.attachment.attachmentId)}
+          src={image.url}
+          alt={image.attachment.name ?? 'Attached image'}
+          style={styles.image}
+        />
+      ))}
+    </div>
+  )
+}
+
 /** One transcript row from the child session's full visible timeline. */
 function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
   row: TranscriptRow
@@ -489,23 +513,28 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
   if (row.kind === 'user') {
     return (
       <div style={styles.userRow}>
-        <div style={styles.userText}>
+        {row.images !== undefined && <TranscriptImages images={row.images} />}
+        {row.text !== '' && <div style={styles.userText}>
           <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
-        </div>
+        </div>}
       </div>
     )
   }
   if (row.kind === 'assistant') {
     return (
       <div style={styles.assistantRow}>
-        <div style={styles.assistantText}>
+        {row.images !== undefined && <TranscriptImages images={row.images} />}
+        {row.text !== '' && <div style={styles.assistantText}>
           <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
-        </div>
+        </div>}
       </div>
     )
   }
   if (row.kind === 'reasoning' || row.kind === 'context') {
-    return <TranscriptDisclosure row={row} streaming={streaming} t={t} />
+    return <>
+      {row.kind === 'context' && row.images !== undefined && <TranscriptImages images={row.images} />}
+      {row.text !== '' && <TranscriptDisclosure row={row} streaming={streaming} t={t} />}
+    </>
   }
   return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
 }

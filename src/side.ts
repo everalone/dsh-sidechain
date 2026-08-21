@@ -56,8 +56,15 @@ export function textBlock(text: string): ContentBlock {
  * @param mode - which command created the child; declared to the child so it
  *   can never misidentify itself.
  */
-export function sidePrompt(question: string, mode: SideMode): ContentBlock {
-  return textBlock(`${SIDE_BOUNDARY_PROMPT}\n\n${SIDE_MODE_LINE[mode]}\n\n${question.trim()}`)
+export function sidePrompt(
+  question: string,
+  mode: SideMode,
+  attachments: readonly ContentBlock[] = [],
+): ContentBlock[] {
+  return [
+    textBlock(`${SIDE_BOUNDARY_PROMPT}\n\n${SIDE_MODE_LINE[mode]}\n\n${question.trim()}`),
+    ...attachments,
+  ]
 }
 
 /**
@@ -72,10 +79,11 @@ export function askSideOneShot(
   question: string,
   deps: SideDeps,
   signal: AbortSignal,
+  attachments: readonly ContentBlock[] = [],
 ): Promise<SubagentRun> {
   return subagents.start(deps.providerName, {
     label: `BTW: ${truncateLabel(question)}`,
-    prompt: [sidePrompt(question, 'btw')],
+    prompt: sidePrompt(question, 'btw', attachments),
     parent,
     signal,
     ...(deps.persona === undefined ? {} : { persona: deps.persona }),
@@ -94,13 +102,14 @@ export function startSideConversation(
   question: string,
   deps: SideDeps,
   signal: AbortSignal,
+  attachments: readonly ContentBlock[] = [],
 ): Promise<ContinuableStart> {
   const label = truncateLabel(question) || 'Side conversation'
   return subagents.startContinuable({
     provider: deps.providerName,
     label,
     request: {
-      prompt: [sidePrompt(question, 'side')],
+      prompt: sidePrompt(question, 'side', attachments),
       parent,
       ...(deps.persona === undefined ? {} : { persona: deps.persona }),
       ...(deps.toolFilter === undefined ? {} : { toolFilter: deps.toolFilter }),

@@ -32,8 +32,8 @@ export function createSidechainCommands(
       name: 'side',
       description: 'Start a side conversation in an ephemeral fork of the current session',
       recordInput: false,
-      input: { hint: '<question>' },
-      handler: async ({ agent, rawInput, signal }) => {
+      input: { hint: '<question>', images: true },
+      handler: async ({ agent, rawInput, attachments, signal }) => {
         const missing = missingProvider()
         if (missing !== undefined) return { kind: 'error', text: missing }
         const arg = rawInput.trim()
@@ -49,7 +49,7 @@ export function createSidechainCommands(
           return { kind: 'error', text: '/side requires a question: /side <question>' }
         }
         try {
-          const { childId } = await startSideConversation(subagents, agent, arg, deps, signal)
+          const { childId } = await startSideConversation(subagents, agent, arg, deps, signal, attachments)
           // Stop this child's settlement notice at the parent inbox boundary;
           // the child remains visible in the sidechain panel.
           settlementSilence.noteChild(agent, childId)
@@ -66,8 +66,8 @@ export function createSidechainCommands(
       // The question body is not persisted into the parent's command/run log:
       // the child session is the durable record (the panel reads it there).
       recordInput: false,
-      input: { hint: '<question>' },
-      handler: async ({ agent, rawInput, signal }) => {
+      input: { hint: '<question>', images: true },
+      handler: async ({ agent, rawInput, attachments, signal }) => {
         const question = rawInput.trim()
         if (question === '') {
           return { kind: 'error', text: '/btw requires a question: /btw <question>' }
@@ -78,7 +78,7 @@ export function createSidechainCommands(
           // Non-blocking one-shot: the child keeps running in the background
           // and its answer streams into the sidechain panel — the main
           // session input stays free, nothing is awaited past the start.
-          const run = await askSideOneShot(subagents, agent, question, deps, signal)
+          const run = await askSideOneShot(subagents, agent, question, deps, signal, attachments)
           // Stop this child's settlement notice at the parent inbox boundary;
           // the child remains visible in the sidechain panel.
           settlementSilence.noteChild(agent, run.id)

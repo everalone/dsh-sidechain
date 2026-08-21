@@ -49,9 +49,17 @@ export interface ToolDetail {
   error?: { name: string; code: string } | undefined
 }
 
+type ImageAttachmentRef = Extract<ContentBlock, { type: 'image' }>['attachment']
+
+/** An image reference plus its browser-ready data URL when the host can serve it. */
+export interface TranscriptImage {
+  attachment: ImageAttachmentRef
+  url?: string | undefined
+}
+
 export type TranscriptRow =
-  | { kind: 'user'; seq: number; text: string }
-  | { kind: 'assistant'; seq: number; text: string }
+  | { kind: 'user'; seq: number; text: string; images?: readonly TranscriptImage[] }
+  | { kind: 'assistant'; seq: number; text: string; images?: readonly TranscriptImage[] }
   | { kind: 'reasoning'; seq: number; text: string }
   | {
     kind: 'context'
@@ -59,6 +67,7 @@ export type TranscriptRow =
     text: string
     source: string | null
     recall: boolean
+    images?: readonly TranscriptImage[]
   }
   | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
@@ -78,6 +87,19 @@ export function blockText(blocks: readonly ContentBlock[]): string {
     .filter(part => part !== '')
     .join('\n\n')
   return text === '' ? '…' : text
+}
+
+function imageRefs(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
+  return blocks.flatMap(block => block.type === 'image' ? [block.attachment] : [])
+}
+
+function transcriptImages(refs: readonly ImageAttachmentRef[]): TranscriptImage[] {
+  return refs.map(attachment => ({ attachment }))
+}
+
+function rowText(blocks: readonly ContentBlock[], images: readonly ImageAttachmentRef[]): string {
+  const text = blockText(blocks)
+  return images.length > 0 && text === '…' ? '' : text
 }
 
 /** Index of the last `session/end-seed` event (fork seed marker), or -1. */
@@ -113,20 +135,23 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
     const view = entries[i]?.view
     switch (event.type) {
       case 'user/message': {
-        const text = blockText(event.data.content)
+        const refs = imageRefs(event.data.content)
+        const text = rowText(event.data.content, refs)
+        const images = refs.length === 0 ? {} : { images: transcriptImages(refs) }
         if (text.startsWith(BOUNDARY_PREFIX)) break
         const source = event.data.source as unknown
         const sourceKind = typeof source === 'object' && source !== null
           ? (source as Record<string, unknown>)['kind']
           : undefined
         if (sourceKind === undefined || sourceKind === 'user') {
-          rows.push({ kind: 'user', seq: event.seq, text })
+          rows.push({ kind: 'user', seq: event.seq, text, ...images })
         } else {
           const provenance = contextProvenance(source)
           rows.push({
             kind: 'context', seq: event.seq, text,
             source: provenance.label,
             recall: provenance.role === 'recall',
+            ...images,
           })
         }
         break
@@ -165,6 +190,17 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
           }
           return []
         })
+        const refs = imageRefs(event.data.message.content)
+        if (refs.length > 0) {
+          const images = transcriptImages(refs)
+          const assistant = settled.findIndex(row => row.kind === 'assistant')
+          if (assistant >= 0) {
+            const row = settled[assistant]
+            if (row !== undefined && row.kind === 'assistant') settled[assistant] = { ...row, images }
+          } else {
+            settled.push({ kind: 'assistant', seq: event.seq, text: '', images })
+          }
+        }
         if (settled.length === 0 && event.data.message.content.length === 0) {
           settled.push({ kind: 'assistant', seq: event.seq, text: '…' })
         }
@@ -367,8 +403,9 @@ export async function fetchTranscript(
   for (const entry of entries) bySeq.set(entry.event.seq, entry)
   const transcript = [...bySeq.values()].sort((a, b) => a.event.seq - b.event.seq)
   transcriptEntryCache.set(address.childSessionId, transcript)
+  const rows = await hydrateTranscriptImages(sessions, address.childSessionId, transcriptRows(transcript))
   return {
-    rows: transcriptRows(transcript),
+    rows,
     produced: producedPaths(transcript),
   }
 }
@@ -405,11 +442,58 @@ export async function fetchActivity(
 const seedBoundaryCache = new Map<string, number>()
 /** Child-owned history accumulated from cheap tail polls. */
 const transcriptEntryCache = new Map<string, readonly TranscriptEntry[]>()
+const imageUrlCache = new Map<string, string | null>()
 
 /** Test seam: drop cached seed boundaries and accumulated transcripts. */
 export function resetSeedBoundaryCache(): void {
   seedBoundaryCache.clear()
   transcriptEntryCache.clear()
+  imageUrlCache.clear()
+}
+
+async function hydrateTranscriptImages(
+  sessions: IApiClient['sessions'],
+  childSessionId: SubagentAddress['childSessionId'],
+  rows: readonly TranscriptRow[],
+): Promise<TranscriptRow[]> {
+  const refs = new Map<string, ImageAttachmentRef>()
+  for (const row of rows) {
+    for (const image of 'images' in row ? row.images ?? [] : []) {
+      refs.set(String(image.attachment.attachmentId), image.attachment)
+    }
+  }
+  if (refs.size === 0) return [...rows]
+
+  const attachment = sessions.attachment
+  if (typeof attachment !== 'function') return [...rows]
+  await Promise.all([...refs].map(async ([id, ref]) => {
+    if (imageUrlCache.has(id)) return
+    try {
+      const response = await attachment.call(sessions, {
+        sessionId: childSessionId,
+        attachmentId: ref.attachmentId,
+      })
+      if (!response.result.ok) {
+        imageUrlCache.set(id, null)
+        return
+      }
+      const data = response.result.value.data
+      imageUrlCache.set(id, data.startsWith('data:') ? data : `data:${ref.mediaType};base64,${data}`)
+    } catch {
+      imageUrlCache.set(id, null)
+    }
+  }))
+
+  return rows.map(row => {
+    if (!('images' in row) || row.images === undefined) return row
+    return {
+      ...row,
+      images: row.images.map(image => {
+        const url = imageUrlCache.get(String(image.attachment.attachmentId))
+        return { ...image, ...(typeof url === 'string' ? { url } : {}) }
+      }),
+    }
+  })
 }
 
 /**
