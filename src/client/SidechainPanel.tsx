@@ -677,6 +677,18 @@ export function SidechainPanel({
     return () => { actionsRef.current.setCatalogOpen(sessionId, false) }
   }, [open, sessionId])
 
+  // Keep the catalog live even if the runtime's automatic subagent events do
+  // not arrive: while the panel is open, periodically refresh so finished
+  // children disappear and freshly created /btw entries appear in the list.
+  const CATALOG_REFRESH_INTERVAL_MS = 5000
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(() => {
+      actionsRef.current.refresh(sessionId)
+    }, CATALOG_REFRESH_INTERVAL_MS)
+    return () => { clearInterval(timer) }
+  }, [open, sessionId])
+
   // ---- Panel width: drag-to-resize (rAF-batched direct DOM writes, one
   // store commit on pointer-up), double-click reset, expand toggle, all
   // clamped and persisted. The panel element's style is written directly
@@ -783,12 +795,15 @@ export function SidechainPanel({
     ? undefined
     : rows.find(candidate => candidate.id === selected)
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
+  // Prefer the session summary's running bit; it is updated by host frames and
+  // is more reliable than the catalog, which may lag until a manual refresh.
   // A child we just created via /btw or /side may not have appeared in the
   // catalog yet; treat it as running so the live poll and waiting hint engage
-  // until the catalog catches up.
+  // until the summary/catalog catches up.
+  const summaryRunning = selected === undefined ? undefined : summaries[selected]?.running
   const selectedRunning = selectedChild !== undefined
-    ? selectedChild.activity === 'running'
-    : selectedMode !== undefined
+    ? (summaryRunning ?? selectedChild.activity === 'running')
+    : (summaryRunning ?? (selectedMode !== undefined))
 
   // Stable key for the selected address (primitive — never churns with
   // unrelated list re-renders), plus refs the persistent poll reads.
@@ -1026,7 +1041,7 @@ export function SidechainPanel({
                 type="button"
                 style={styles.back}
                 title={t('view.back')}
-                onClick={() => { selectChild(undefined) }}
+                onClick={() => { actionsRef.current.refresh(sessionId); selectChild(undefined) }}
               >
                 <IconChevronLeftOutline14 />
                 {t('view.back')}
