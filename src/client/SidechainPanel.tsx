@@ -956,13 +956,17 @@ export function SidechainPanel({
   // settle animation for a child that is still running.
   const settleGuard = useRef<{ id: SessionId | undefined; activity: ChildActivity } | undefined>(undefined)
   useEffect(() => {
-    if (selectedChild === undefined) {
+    // Keep tracking the selected id even when a ready catalog no longer
+    // contains the child. The address can still be reconstructed from the
+    // selection/mode, and this is the exact transition where the final
+    // transcript fetch is needed.
+    if (selected === undefined) {
       settleGuard.current = undefined
       return
     }
     const previous = settleGuard.current
-    settleGuard.current = { id: selectedChild.id, activity: selectedActivity }
-    if (previous === undefined || previous.id !== selectedChild.id) return
+    settleGuard.current = { id: selected, activity: selectedActivity }
+    if (previous === undefined || previous.id !== selected) return
     if (previous.activity === 'running' && selectedActivity === 'inactive') {
       const target = addressRef.current
       if (target !== undefined) request(target, false)
@@ -974,7 +978,7 @@ export function SidechainPanel({
         )
       }
     }
-  }, [selectedChild, selectedActivity, request])
+  }, [selected, selectedActivity, request])
 
   // Keep the newest content in view while a run streams — but only when the
   // reader is already near the bottom, so scrolling up to re-read is stable.
