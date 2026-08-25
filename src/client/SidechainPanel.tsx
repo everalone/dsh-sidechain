@@ -157,17 +157,41 @@ export function diagnosticText(
   }
 }
 
-/** Shared token-level palette (falls back gracefully when the app lacks the variables). */
+/**
+ * Shared token-level palette. DSH web themes the shell through its design
+ * tokens (`--dsw-alias-*` / `--dsw-specific-*`, declared on `body` and
+ * overridden under `body[data-ds-dark-theme]` by the host's theme plugin),
+ * so consuming those tokens makes the panel follow the active theme with no
+ * theme JS of our own. Every token carries a light-mode literal fallback so
+ * older hosts that do not inject the token stylesheet still render the
+ * panel's light appearance.
+ */
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
 
 const C = {
-  text1: 'var(--ds-color-text-1, #1d2129)',
-  text2: 'var(--ds-color-text-2, #4e5969)',
-  surface2: 'var(--ds-color-surface-2, #f2f3f5)',
-  hover: 'var(--ds-color-hover, rgba(0, 0, 0, 0.06))',
-  border: 'var(--ds-color-border-1, rgba(0, 0, 0, 0.12))',
-  primary: 'var(--ds-color-primary, #3370ff)',
-  danger: 'var(--ds-color-danger, #f53f3f)',
+  /** Primary text (light #0f1115 / dark #f9fafb). */
+  text1: 'var(--dsw-alias-label-primary, #0f1115)',
+  /** Secondary text (light #61666b / dark #cfd3d6). */
+  text2: 'var(--dsw-alias-label-secondary, #61666b)',
+  /** Tertiary text (light #81858c / dark #adb2b8). */
+  text3: 'var(--dsw-alias-label-tertiary, #81858c)',
+  /** Solid neutral surface for active chips (light #f1f3f5 / dark #353638). */
+  surface2: 'var(--dsw-alias-interactive-bg-hover-solid, #f1f3f5)',
+  /** Hover wash (light rgba(38,49,81,0.06) / dark rgba(255,255,255,0.08)). */
+  hover: 'var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 81, 0.06))',
+  /** Hairline borders (light rgba(0,0,0,0.10) / dark rgba(255,255,255,0.12)). */
+  border: 'var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1))',
+  /** Primary fill for badges and send button — the in-chat primary action
+   *  fill, DeepSeek blue in both themes (matching the host composer). */
+  primary: 'var(--dsw-alias-button-info-fill, #4176e6)',
+  /** Foreground on the primary fill; the host keeps white on info-fill. */
+  onPrimary: '#fff',
+  /** Error / destructive. */
+  danger: 'var(--dsw-alias-state-error-primary, #ec1313)',
+  /** User-bubble tint, matching the main chat's bubble surface. */
+  bubble: 'var(--dsw-specific-bubble, #edf3fe)',
+  /** Neutral platform surface (light #f5f6f7 / dark #353638). */
+  platform: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
 } as const
 
 /** Side panel enter/exit animation duration (ms). */
@@ -185,12 +209,12 @@ const styles: Record<string, CSSProperties> = {
   },
   badge: {
     minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8,
-    background: C.primary, color: '#fff', fontSize: 11, lineHeight: '16px', textAlign: 'center',
+    background: C.primary, color: C.onPrimary, fontSize: 11, lineHeight: '16px', textAlign: 'center',
   },
   panel: {
     position: 'fixed', top: 0, right: 0, bottom: 0, width: 360, maxWidth: '92vw',
     display: 'flex', flexDirection: 'column',
-    background: 'var(--ds-color-bg-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
+    background: 'var(--dsw-alias-bg-layer-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
     boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.12)', zIndex: 200,
     fontSize: 13, color: C.text1,
     transition: `transform ${PANEL_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${PANEL_TRANSITION_MS}ms ease`,
@@ -251,17 +275,17 @@ const styles: Record<string, CSSProperties> = {
   imageRow: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 },
   image: {
     display: 'block', width: 'min(100%, 280px)', maxHeight: 240, objectFit: 'contain',
-    borderRadius: 6, border: '1px solid var(--ds-color-border, #d7dce3)', background: C.surface2,
+    borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface2,
   },
   userText: {
     padding: '6px 10px', borderRadius: 10,
-    background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text1,
+    background: C.platform, color: C.text1,
     width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
   },
   assistantRow: { alignSelf: 'flex-start', maxWidth: '100%' },
   assistantText: {
     padding: '6px 10px', borderRadius: 10,
-    background: 'var(--ds-color-surface-2, #eef2ff)', color: C.text1,
+    background: C.bubble, color: C.text1,
     width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
   },
   disclosureSummary: {
@@ -270,11 +294,11 @@ const styles: Record<string, CSSProperties> = {
   },
   disclosureSeparator: {
     flex: 'none', width: 2, height: 2, margin: '0 8px', borderRadius: 1,
-    background: 'var(--ds-color-text-3, #9ca3af)',
+    background: C.text3,
   },
   disclosureBody: {
     margin: '4px 0 4px 22px', padding: '8px 10px', maxHeight: 240, overflow: 'auto',
-    borderRadius: 6, background: 'var(--ds-color-bg-2, #f2f3f5)', color: C.text2,
+    borderRadius: 6, background: 'var(--dsw-alias-markdown-code-block, #f9fafb)', color: C.text2,
     fontFamily: MONO, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
   },
   toolRow: { color: C.text2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
@@ -282,7 +306,7 @@ const styles: Record<string, CSSProperties> = {
   toolDetail: { padding: '4px 0 6px' },
   toolArgs: {
     margin: '4px 0', padding: '6px 8px', borderRadius: 6,
-    background: 'var(--ds-color-bg-2, #f2f3f5)', fontFamily: MONO,
+    background: 'var(--dsw-alias-markdown-code-block, #f9fafb)', fontFamily: MONO,
     fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
     maxHeight: 180, overflowY: 'auto',
   },
@@ -292,12 +316,12 @@ const styles: Record<string, CSSProperties> = {
   },
   input: {
     flex: 1, minWidth: 0, padding: '6px 10px', border: `1px solid ${C.border}`, borderRadius: 8,
-    background: 'var(--ds-color-bg-1, #ffffff)', color: C.text1, fontSize: 13, outline: 'none',
+    background: 'var(--dsw-specific-input-major, #ffffff)', color: C.text1, fontSize: 13, outline: 'none',
   },
   sendButton: {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
     width: 28, height: 28, padding: 0, border: 'none', borderRadius: 8,
-    background: C.primary, color: '#fff', cursor: 'pointer',
+    background: C.primary, color: C.onPrimary, cursor: 'pointer',
   },
   readonly: {
     padding: '8px 12px', borderTop: `1px solid ${C.border}`,
@@ -1164,7 +1188,7 @@ export function SidechainPanel({
                 {selectedRunning && (
                   <div style={{
                     marginTop: 8,
-                    color: 'var(--ds-color-primary, #4D6BFE)',
+                    color: 'var(--dsw-alias-state-business-primary, #4176e6)',
                     textAlign: 'left',
                     fontSize: 12,
                     lineHeight: 1.5,

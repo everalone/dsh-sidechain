@@ -102,8 +102,8 @@ function BtwTranscript({ rows, running }: {
             <div key={`${row.kind}:${row.seq}:${index}`} style={{ alignSelf: 'flex-start', maxWidth: '100%' }}>
               <div style={{
                 padding: '6px 10px', borderRadius: 10,
-                background: 'var(--ds-color-bg-2, #f2f3f5)',
-                color: 'var(--ds-color-text-1, #1d2129)',
+                background: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
+                color: 'var(--dsw-alias-label-primary, #0f1115)',
                 width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
               }}>
                 <MarkdownText text={row.text} streaming={false} />
@@ -116,8 +116,8 @@ function BtwTranscript({ rows, running }: {
             <div key={`${row.kind}:${row.seq}:${index}`} style={{ alignSelf: 'flex-start', maxWidth: '100%' }}>
               <div style={{
                 padding: '6px 10px', borderRadius: 10,
-                background: 'var(--ds-color-surface-2, #eef2ff)',
-                color: 'var(--ds-color-text-1, #1d2129)',
+                background: 'var(--dsw-specific-bubble, #edf3fe)',
+                color: 'var(--dsw-alias-label-primary, #0f1115)',
                 width: 'fit-content', maxWidth: '100%', fontSize: 13, lineHeight: 1.5,
               }}>
                 <MarkdownText text={row.text} streaming={running && index === lastIndex} />
@@ -128,7 +128,7 @@ function BtwTranscript({ rows, running }: {
         if (row.kind === 'tool') {
           return (
             <div key={`${row.kind}:${row.seq}:${index}`} style={{
-              color: 'var(--ds-color-text-2, #4e5969)', fontSize: 12,
+              color: 'var(--dsw-alias-label-secondary, #61666b)', fontSize: 12,
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
               🔧 {row.name}{row.failed ? ' ✗' : ''}
@@ -212,7 +212,7 @@ export function SideCommandCard({ node, sessionId, useSessions, readChildTranscr
       style={{
         padding: '6px 10px',
         borderRadius: '8px',
-        background: 'var(--ds-color-surface-2, #f2f3f5)',
+        background: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
         fontSize: '13px',
         lineHeight: '1.5',
       }}
@@ -224,7 +224,7 @@ export function SideCommandCard({ node, sessionId, useSessions, readChildTranscr
       </div>
       {kind === 'btw' && rows !== null && childRunning
         && !rows.some(row => row.kind === 'assistant' || row.kind === 'reasoning' || row.kind === 'tool') && (
-        <div style={{ marginTop: 8, color: 'var(--ds-color-text-2, #4e5969)', fontSize: 12 }}>
+        <div style={{ marginTop: 8, color: 'var(--dsw-alias-label-secondary, #61666b)', fontSize: 12 }}>
           …
         </div>
       )}

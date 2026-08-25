@@ -14,10 +14,12 @@ export const SIDECHAIN_STYLE_CSS = `
 }
 .dsh-sidechain-shimmer {
   background-image: linear-gradient(
-    100deg,
-    var(--ds-color-primary, #3370ff) 25%,
-    #a8c2ff 50%,
-    var(--ds-color-primary, #3370ff) 75%
+    90deg,
+    var(--dsw-static-deepseek-500, #4176e6) 0%,
+    var(--dsw-static-deepseek-500, #4176e6) 40%,
+    var(--dsw-static-deepseek-200, #d3e2ff) 50%,
+    var(--dsw-static-deepseek-500, #4176e6) 60%,
+    var(--dsw-static-deepseek-500, #4176e6) 100%
   );
   background-size: 200% auto;
   -webkit-background-clip: text;
