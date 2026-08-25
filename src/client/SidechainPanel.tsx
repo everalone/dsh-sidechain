@@ -839,10 +839,18 @@ export function SidechainPanel({
   // skipped (the poll interval is shorter than heavy first reads; piling up
   // overlapping transcript requests would starve the server).
   const fetchInFlight = useRef(false)
-  const request = useCallback((target: SubagentAddress, showLoading: boolean) => {
+  const pendingFinalRead = useRef<SubagentAddress | undefined>(undefined)
+  const request = useCallback((target: SubagentAddress, showLoading: boolean, final = false) => {
+    if (fetchInFlight.current && final) {
+      pendingFinalRead.current = target
+      return
+    }
     if (fetchInFlight.current && !showLoading) return
     const epoch = ++fetchEpoch.current
-    if (showLoading) setTranscriptState('loading')
+    if (showLoading) {
+      pendingFinalRead.current = undefined
+      setTranscriptState('loading')
+    }
     fetchInFlight.current = true
     void actionsRef.current.readTranscript(target).then((result) => {
       fetchInFlight.current = false
@@ -854,6 +862,9 @@ export function SidechainPanel({
         ? (result?.produced ?? [])
         : mergeProduced(previous, result?.produced ?? []))
       setTranscriptState(result === null ? 'error' : 'ready')
+      const pending = pendingFinalRead.current
+      pendingFinalRead.current = undefined
+      if (pending !== undefined) request(pending, false)
     })
   }, [])
 
@@ -943,17 +954,15 @@ export function SidechainPanel({
     })
   }, [runningIds])
 
-  // On the running → inactive transition (the catalog activity flip): pull
+  // On a running/unknown → inactive transition (the catalog activity flip): pull
   // the settled transcript exactly, and mark the finalize swap — the rows
   // switch from streaming to settled rendering (syntax highlighting, KaTeX,
   // file mentions land) — with a brief fade via the Web Animations API.
   // The guard records the child identity: switching to another child must
   // reset it, so a long-finished child never replays the previous child's
-  // settle transition. The settle transition only fires on the explicit
-  // `running -> inactive` transition; transitions through `unknown` (e.g.
-  // the catalog is not yet loaded, the child is freshly created but the
-  // catalog has not placed it) are silent so an early mount does not flash a
-  // settle animation for a child that is still running.
+  // settle transition. `unknown -> inactive` matters when a fast child ends
+  // before the catalog's first successful read; without the final fetch the
+  // panel can retain the partial transcript from its initial read.
   const settleGuard = useRef<{ id: SessionId | undefined; activity: ChildActivity } | undefined>(undefined)
   useEffect(() => {
     // Keep tracking the selected id even when a ready catalog no longer
@@ -967,9 +976,12 @@ export function SidechainPanel({
     const previous = settleGuard.current
     settleGuard.current = { id: selected, activity: selectedActivity }
     if (previous === undefined || previous.id !== selected) return
-    if (previous.activity === 'running' && selectedActivity === 'inactive') {
+    if (
+      selectedActivity === 'inactive'
+      && (previous.activity === 'running' || previous.activity === 'unknown')
+    ) {
       const target = addressRef.current
-      if (target !== undefined) request(target, false)
+      if (target !== undefined) request(target, false, true)
       const el = transcriptRef.current
       if (el !== null && !prefersReducedMotion()) {
         el.animate(
