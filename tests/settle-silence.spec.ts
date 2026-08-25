@@ -33,6 +33,7 @@ function userMessage(text: string): UserMessage {
 function fakeAgent(): Agent & { delivered: { method: string; message: UserMessage }[] } {
   const delivered: { method: string; message: UserMessage }[] = []
   return {
+    session: { id: OTHER },
     delivered,
     followup(message: UserMessage) { delivered.push({ method: 'followup', message }) },
     steer(message: UserMessage) { delivered.push({ method: 'steer', message }) },
@@ -80,7 +81,7 @@ describe('createSettlementSilence', () => {
     expect(parent.delivered).toEqual([])
   })
 
-  it('passes ordinary user messages and unrelated child settlements', () => {
+  it('passes ordinary user messages but drops any runtime settlement notice', () => {
     const { silence } = setup()
     const parent = fakeAgent()
     silence.noteChild(parent, SIDE)
@@ -88,7 +89,6 @@ describe('createSettlementSilence', () => {
     parent.steer(notice(OTHER))
     expect(parent.delivered).toEqual([
       { method: 'followup', message: userMessage('继续干活') },
-      { method: 'steer', message: notice(OTHER) },
     ])
   })
 

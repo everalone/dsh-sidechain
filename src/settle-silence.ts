@@ -6,9 +6,9 @@
  * Session log.
  *
  * Child identity is persisted under DSH_HOME so resumed parents still reject
- * notices from side children created before a restart. Only ids registered by
- * this plugin are suppressed; ordinary messages and other subagents use the
- * original Agent delivery methods unchanged.
+ * authored reports from side children created before a restart. Runtime
+ * settlement notices are always suppressed because they are bookkeeping, not
+ * user input; ordinary messages and other subagent reports remain unchanged.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -67,7 +67,8 @@ interface SettlementSource {
 
 function isSideChildDelivery(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
   const source = message.source as SettlementSource | undefined
-  return (source?.kind === 'subagent-report' || source?.kind === 'subagent-settled')
+  if (source?.kind === 'subagent-settled') return true
+  return source?.kind === 'subagent-report'
     && source.senderSessionId !== undefined
     && children.has(source.senderSessionId as SessionId)
 }
