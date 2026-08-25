@@ -56,10 +56,11 @@ import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
-  readPanelWidth, revealChild, selectChild, selectedChildId, subscribeSidechainPanel,
+  readPanelWidth, revealChild, selectChild, selectedChildId, selectedChildMode, subscribeSidechainPanel,
   toggleSidechainPanel, writePanelWidth,
 } from './panel-state.ts'
-import { observeCreatedChildren, type ObservedSideCommands } from './SideCommandCard.tsx'
+import { resolveChildActivity, type ChildActivity } from './child-activity.ts'
+import { observeCreatedChildren, resolveChildSessionId, type ObservedSideCommands } from './SideCommandCard.tsx'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { readActivityRound } from './sidechain-activity.ts'
 import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
@@ -169,6 +170,9 @@ const C = {
   danger: 'var(--ds-color-danger, #f53f3f)',
 } as const
 
+/** Side panel enter/exit animation duration (ms). */
+const PANEL_TRANSITION_MS = 240
+
 const styles: Record<string, CSSProperties> = {
   toggle: {
     display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -189,6 +193,7 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--ds-color-bg-1, #ffffff)', borderLeft: `1px solid ${C.border}`,
     boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.12)', zIndex: 200,
     fontSize: 13, color: C.text1,
+    transition: `transform ${PANEL_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${PANEL_TRANSITION_MS}ms ease`,
   },
   resizer: {
     position: 'absolute', top: 0, bottom: 0, left: -6, width: 12,
@@ -581,10 +586,31 @@ export function SidechainPanel({
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
+  const [selectedMode, setSelectedMode] = useState(selectedChildMode)
   useEffect(() => subscribeSidechainPanel(() => {
     setOpen(isSidechainPanelOpen())
     setSelected(selectedChildId())
+    setSelectedMode(selectedChildMode())
   }), [])
+
+  // Enter/exit animation: keep the panel mounted through its exit transition,
+  // then unmount only after the slide-out finishes.
+  const [mounted, setMounted] = useState(isSidechainPanelOpen)
+  const [entered, setEntered] = useState(false)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+    } else {
+      setEntered(false)
+      const timer = setTimeout(() => setMounted(false), PANEL_TRANSITION_MS)
+      return () => clearTimeout(timer)
+    }
+  }, [open])
+  useEffect(() => {
+    if (!mounted || !open) return
+    const raf = requestAnimationFrame(() => setEntered(true))
+    return () => cancelAnimationFrame(raf)
+  }, [mounted, open])
 
   // This host remains mounted in the blank-session composer, where command
   // rows and the header do not exist. Seed replayed commands, then reveal only
@@ -612,7 +638,20 @@ export function SidechainPanel({
       observedRef.current.startedAt,
     )
     observedRef.current.known = observed.known
-    for (const child of observed.children) revealChild(child)
+    for (const child of observed.children) {
+      // The command's own kind tells us the child's mode even before the
+      // catalog has placed it — so the panel can start reading the child
+      // immediately instead of waiting for a manual refresh.
+      const owner = commands.find(candidate => {
+        const name = candidate.name
+        return (name === 'side' || name === 'btw')
+          && resolveChildSessionId(candidate, name) === child
+      })
+      const mode = owner !== undefined
+        ? (owner.name === 'btw' ? 'one-shot' : 'continuable')
+        : undefined
+      revealChild(child, mode)
+    }
   }, [commands, sessionId])
 
   const catalogs = useSessions(state => state.subagentsByParent)
@@ -637,6 +676,18 @@ export function SidechainPanel({
     setCatalogOpen(sessionId, true)
     refresh(sessionId)
     return () => { actionsRef.current.setCatalogOpen(sessionId, false) }
+  }, [open, sessionId])
+
+  // Keep the catalog live even if the runtime's automatic subagent events do
+  // not arrive: while the panel is open, periodically refresh so finished
+  // children disappear and freshly created /btw entries appear in the list.
+  const CATALOG_REFRESH_INTERVAL_MS = 5000
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(() => {
+      actionsRef.current.refresh(sessionId)
+    }, CATALOG_REFRESH_INTERVAL_MS)
+    return () => { clearInterval(timer) }
   }, [open, sessionId])
 
   // ---- Panel width: drag-to-resize (rAF-batched direct DOM writes, one
@@ -728,20 +779,37 @@ export function SidechainPanel({
   }, [])
 
   // The selected child's durable address (stable while selection/catalog stay).
+  // Prefer the catalog's authoritative mode; when the catalog has not yet
+  // placed the freshly-created child, fall back to the mode we learned from
+  // its `/side` or `/btw` command so the panel can stream immediately.
   const address = useMemo<SubagentAddress | undefined>(() => {
     if (selected === undefined) return undefined
     const row = rows.find(candidate => candidate.kind === 'child' && candidate.id === selected)
-    return row?.kind === 'child'
-      ? { parentSessionId: sessionId, childSessionId: selected, mode: row.mode }
-      : undefined
-  }, [selected, rows, sessionId])
+    const mode = row?.kind === 'child' ? row.mode : selectedMode
+    return mode === undefined
+      ? undefined
+      : { parentSessionId: sessionId, childSessionId: selected, mode }
+  }, [selected, rows, selectedMode, sessionId])
 
   // The selected child's catalog row (its activity drives the live poll).
   const selectedRow = selected === undefined
     ? undefined
     : rows.find(candidate => candidate.id === selected)
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
-  const selectedRunning = selectedChild?.activity === 'running'
+  // Resolve the selected child's activity through the tri-state resolver so
+  // missing or loading data is never reported as `running`. The session
+  // summary's running bit is preferred when present (host-updated), otherwise
+  // the catalog entry is used; a missing child on a ready catalog is
+  // `inactive`, and a not-yet-loaded / loading / errored catalog is `unknown`.
+  // `selectedMode` only carries the child's mode (one-shot / continuable) and
+  // is intentionally NOT used to infer activity.
+  const summaryRunning = selected === undefined ? undefined : summaries[selected]?.running
+  const selectedActivity: ChildActivity = resolveChildActivity({
+    catalogState: catalog?.state ?? 'absent',
+    catalogActivity: selectedChild?.activity,
+    summaryRunning,
+  })
+  const selectedRunning = selectedActivity === 'running'
 
   // Stable key for the selected address (primitive — never churns with
   // unrelated list re-renders), plus refs the persistent poll reads.
@@ -881,17 +949,25 @@ export function SidechainPanel({
   // file mentions land) — with a brief fade via the Web Animations API.
   // The guard records the child identity: switching to another child must
   // reset it, so a long-finished child never replays the previous child's
-  // settle transition.
-  const settleGuard = useRef<{ id: SessionId | undefined; running: boolean } | undefined>(undefined)
+  // settle transition. The settle transition only fires on the explicit
+  // `running -> inactive` transition; transitions through `unknown` (e.g.
+  // the catalog is not yet loaded, the child is freshly created but the
+  // catalog has not placed it) are silent so an early mount does not flash a
+  // settle animation for a child that is still running.
+  const settleGuard = useRef<{ id: SessionId | undefined; activity: ChildActivity } | undefined>(undefined)
   useEffect(() => {
-    if (selectedChild === undefined) {
+    // Keep tracking the selected id even when a ready catalog no longer
+    // contains the child. The address can still be reconstructed from the
+    // selection/mode, and this is the exact transition where the final
+    // transcript fetch is needed.
+    if (selected === undefined) {
       settleGuard.current = undefined
       return
     }
     const previous = settleGuard.current
-    settleGuard.current = { id: selectedChild.id, running: selectedRunning }
-    if (previous === undefined || previous.id !== selectedChild.id) return
-    if (previous.running === true && !selectedRunning) {
+    settleGuard.current = { id: selected, activity: selectedActivity }
+    if (previous === undefined || previous.id !== selected) return
+    if (previous.activity === 'running' && selectedActivity === 'inactive') {
       const target = addressRef.current
       if (target !== undefined) request(target, false)
       const el = transcriptRef.current
@@ -902,7 +978,7 @@ export function SidechainPanel({
         )
       }
     }
-  }, [selectedChild, selectedRunning, request])
+  }, [selected, selectedActivity, request])
 
   // Keep the newest content in view while a run streams — but only when the
   // reader is already near the bottom, so scrolling up to re-read is stable.
@@ -950,10 +1026,17 @@ export function SidechainPanel({
     || (catalog.state === 'loading' && rows.length === 0)
   const empty = catalog !== undefined && catalog.state === 'ready' && rows.length === 0
 
+  const panelTransform = entered ? 'translateX(0)' : 'translateX(100%)'
+  const panelOpacity = entered ? 1 : 0
   return (
     <>
-      {open && (
-        <aside ref={panelRef} style={{ ...styles.panel, width }} role="complementary" aria-label={t('panel.title')}>
+      {mounted && (
+        <aside
+          ref={panelRef}
+          style={{ ...styles.panel, width, transform: panelTransform, opacity: panelOpacity }}
+          role="complementary"
+          aria-label={t('panel.title')}
+        >
           <div
             style={styles.resizer}
             title={t('panel.resize')}
@@ -972,7 +1055,7 @@ export function SidechainPanel({
                 type="button"
                 style={styles.back}
                 title={t('view.back')}
-                onClick={() => { selectChild(undefined) }}
+                onClick={() => { actionsRef.current.refresh(sessionId); selectChild(undefined) }}
               >
                 <IconChevronLeftOutline14 />
                 {t('view.back')}
@@ -1047,7 +1130,7 @@ export function SidechainPanel({
           ) : (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div ref={transcriptRef} style={styles.transcript} onScroll={onTranscriptScroll}>
-                {transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
+                {!selectedRunning && transcriptState === 'loading' && <div style={styles.notice}>{t('view.loading')}</div>}
                 {transcriptState === 'error' && (
                   <div style={styles.error}>
                     <span>{t('view.error')}</span>
@@ -1063,7 +1146,7 @@ export function SidechainPanel({
                     </button>
                   </div>
                 )}
-                {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && (
+                {transcriptState === 'ready' && transcript !== null && transcript.length === 0 && !selectedRunning && (
                   <div style={styles.notice}>{t('view.empty')}</div>
                 )}
                 {(transcript ?? []).map((row, index, all) => (
@@ -1076,6 +1159,17 @@ export function SidechainPanel({
                     t={t}
                   />
                 ))}
+                {/* Bottom-left waiting hint, DeepSeek blue, present while the
+                    child is running (i18n-driven copy via view.waiting). */}
+                {selectedRunning && (
+                  <div style={{
+                    marginTop: 8,
+                    color: 'var(--ds-color-primary, #4D6BFE)',
+                    textAlign: 'left',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                  }}>{t('view.waiting')}</div>
+                )}
               </div>
               {address.mode === 'one-shot' ? (
                 <div style={styles.readonly}>{t('view.readonly')}</div>
