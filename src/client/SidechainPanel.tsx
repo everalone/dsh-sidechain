@@ -59,6 +59,7 @@ import {
   readPanelWidth, revealChild, selectChild, selectedChildId, selectedChildMode, subscribeSidechainPanel,
   toggleSidechainPanel, writePanelWidth,
 } from './panel-state.ts'
+import { resolveChildActivity, type ChildActivity } from './child-activity.ts'
 import { observeCreatedChildren, resolveChildSessionId, type ObservedSideCommands } from './SideCommandCard.tsx'
 import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { readActivityRound } from './sidechain-activity.ts'
@@ -795,15 +796,20 @@ export function SidechainPanel({
     ? undefined
     : rows.find(candidate => candidate.id === selected)
   const selectedChild = selectedRow !== undefined && selectedRow.kind === 'child' ? selectedRow : undefined
-  // Prefer the session summary's running bit; it is updated by host frames and
-  // is more reliable than the catalog, which may lag until a manual refresh.
-  // A child we just created via /btw or /side may not have appeared in the
-  // catalog yet; treat it as running so the live poll and waiting hint engage
-  // until the summary/catalog catches up.
+  // Resolve the selected child's activity through the tri-state resolver so
+  // missing or loading data is never reported as `running`. The session
+  // summary's running bit is preferred when present (host-updated), otherwise
+  // the catalog entry is used; a missing child on a ready catalog is
+  // `inactive`, and a not-yet-loaded / loading / errored catalog is `unknown`.
+  // `selectedMode` only carries the child's mode (one-shot / continuable) and
+  // is intentionally NOT used to infer activity.
   const summaryRunning = selected === undefined ? undefined : summaries[selected]?.running
-  const selectedRunning = selectedChild !== undefined
-    ? (summaryRunning ?? selectedChild.activity === 'running')
-    : (summaryRunning ?? (selectedMode !== undefined))
+  const selectedActivity: ChildActivity = resolveChildActivity({
+    catalogState: catalog?.state ?? 'absent',
+    catalogActivity: selectedChild?.activity,
+    summaryRunning,
+  })
+  const selectedRunning = selectedActivity === 'running'
 
   // Stable key for the selected address (primitive — never churns with
   // unrelated list re-renders), plus refs the persistent poll reads.
@@ -943,17 +949,21 @@ export function SidechainPanel({
   // file mentions land) — with a brief fade via the Web Animations API.
   // The guard records the child identity: switching to another child must
   // reset it, so a long-finished child never replays the previous child's
-  // settle transition.
-  const settleGuard = useRef<{ id: SessionId | undefined; running: boolean } | undefined>(undefined)
+  // settle transition. The settle transition only fires on the explicit
+  // `running -> inactive` transition; transitions through `unknown` (e.g.
+  // the catalog is not yet loaded, the child is freshly created but the
+  // catalog has not placed it) are silent so an early mount does not flash a
+  // settle animation for a child that is still running.
+  const settleGuard = useRef<{ id: SessionId | undefined; activity: ChildActivity } | undefined>(undefined)
   useEffect(() => {
     if (selectedChild === undefined) {
       settleGuard.current = undefined
       return
     }
     const previous = settleGuard.current
-    settleGuard.current = { id: selectedChild.id, running: selectedRunning }
+    settleGuard.current = { id: selectedChild.id, activity: selectedActivity }
     if (previous === undefined || previous.id !== selectedChild.id) return
-    if (previous.running === true && !selectedRunning) {
+    if (previous.activity === 'running' && selectedActivity === 'inactive') {
       const target = addressRef.current
       if (target !== undefined) request(target, false)
       const el = transcriptRef.current
@@ -964,7 +974,7 @@ export function SidechainPanel({
         )
       }
     }
-  }, [selectedChild, selectedRunning, request])
+  }, [selectedChild, selectedActivity, request])
 
   // Keep the newest content in view while a run streams — but only when the
   // reader is already near the bottom, so scrolling up to re-read is stable.

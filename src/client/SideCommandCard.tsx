@@ -14,6 +14,7 @@ import type { CommandNode, SessionId, SessionListState, SubagentAddress } from '
 import { useEffect, useRef, useState } from 'react'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranscriptRow } from './sidechain-view.ts'
+import { resolveChildActivity, type ChildActivity } from './child-activity.ts'
 
 /** Props supplied by the keyed command row. */
 export interface SideCommandCardProps {
@@ -80,7 +81,14 @@ export function observeCreatedChildren(
 /** Poll interval for a running /btw card transcript (ms). */
 const BTW_CARD_POLL_INTERVAL_MS = 1200
 
-/** Inline transcript for a settled /btw command. */
+/**
+ * Compact inline transcript for a /btw command. The card renders only the
+ * user prompt, assistant answer, and one-line tool labels on purpose:
+ * reasoning rows, parent-session context rows, and image attachments are
+ * intentionally omitted to keep the command card compact. The full
+ * transcript (including reasoning, context, and images) remains available
+ * in the sidechain panel's conversation view.
+ */
 function BtwTranscript({ rows, running }: {
   rows: readonly TranscriptRow[]
   running: boolean
@@ -147,7 +155,22 @@ export function SideCommandCard({ node, sessionId, useSessions, readChildTranscr
   const catalog = useSessions(state => state.subagentsByParent[sessionId])
   const catalogEntry = childId === undefined ? undefined
     : catalog?.entries.find(entry => entry.kind === 'child' && entry.id === childId)
-  const childRunning = childId !== undefined && (catalogEntry === undefined || (catalogEntry.kind === 'child' && catalogEntry.activity === 'running'))
+  // Combine the parent catalog's reported activity with the host's session
+  // summary running bit. A missing catalog entry is not the same as a running
+  // child: the catalog may be unloaded, loading, errored, or simply have not
+  // noticed the freshly-created child yet. None of those states justify an
+  // infinite transcript poll or a permanent "Deep diving..." hint, so the
+  // resolver returns `unknown` and the card only polls when activity is
+  // explicitly confirmed `running`.
+  const summaryRunning = childId === undefined
+    ? undefined
+    : useSessions(state => state.byId[childId]?.running)
+  const childActivity: ChildActivity = resolveChildActivity({
+    catalogState: catalog?.state ?? 'absent',
+    catalogActivity: catalogEntry?.kind === 'child' ? catalogEntry.activity : undefined,
+    summaryRunning,
+  })
+  const childRunning = childActivity === 'running'
 
   const [rows, setRows] = useState<readonly TranscriptRow[] | null>(null)
   const readRef = useRef(readChildTranscript)
