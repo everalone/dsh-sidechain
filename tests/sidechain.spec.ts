@@ -57,6 +57,7 @@ interface Harness {
   }
   commands: CommandDefinition[]
   noteChild: ReturnType<typeof vi.fn>
+  reserveChild: ReturnType<typeof vi.fn>
 }
 
 function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
@@ -67,8 +68,9 @@ function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
     getProvider: vi.fn(() => ({ name: deps.providerName })),
   } as unknown as Harness['subagents']
   const noteChild = vi.fn()
-  const commands = createSidechainCommands(subagents, deps, { noteChild })
-  return { subagents, commands, noteChild }
+  const reserveChild = vi.fn(() => CHILD_ID)
+  const commands = createSidechainCommands(subagents, deps, { noteChild, reserveChild })
+  return { subagents, commands, noteChild, reserveChild }
 }
 
 function invoke(
@@ -255,14 +257,21 @@ describe('/btw (non-blocking one-shot side question)', () => {
 
 describe('/side (continuable side thread)', () => {
   it('starts a continuable fork child labeled from the question', async () => {
-    const { subagents, commands, noteChild } = makeHarness()
-    subagents.startContinuable.mockResolvedValue({ childId: CHILD_ID, messageId: 'm1' } as ContinuableStart)
+    const { subagents, commands, noteChild, reserveChild } = makeHarness()
+    const order: string[] = []
+    reserveChild.mockImplementation(() => { order.push('reserve'); return CHILD_ID })
+    subagents.startContinuable.mockImplementation(async (spec: ContinuableStartSpec) => {
+      order.push('start')
+      return { childId: spec.childId, messageId: 'm1' } as ContinuableStart
+    })
 
     const result = await invoke(commands[0]!, '  investigate the plugin seams  ')
 
     expect(result).toEqual({ kind: 'success', text: `Side conversation started: ${String(CHILD_ID)}.` })
+    expect(order).toEqual(['reserve', 'start'])
     expect(subagents.startContinuable).toHaveBeenCalledTimes(1)
     const spec = subagents.startContinuable.mock.calls[0]![0] as ContinuableStartSpec
+    expect(spec.childId).toBe(CHILD_ID)
     expect(spec.provider).toBe('fork')
     expect(spec.label).toBe('investigate the plugin seams')
     expect(spec.request.parent).toBe(agent)

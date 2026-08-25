@@ -19,7 +19,7 @@ import {
 export function createSidechainCommands(
   subagents: SubagentsLike,
   deps: SideDeps,
-  settlementSilence: Pick<SettlementSilence, 'noteChild'>,
+  settlementSilence: Pick<SettlementSilence, 'noteChild' | 'reserveChild'>,
 ): CommandDefinition[] {
   /** Loud hint when the configured provider is absent from the deployment. */
   const missingProvider = (): string | undefined => {
@@ -49,7 +49,10 @@ export function createSidechainCommands(
           return { kind: 'error', text: '/side requires a question: /side <question>' }
         }
         try {
-          const { childId } = await startSideConversation(subagents, agent, arg, deps, signal, attachments)
+          const reservedChildId = settlementSilence.reserveChild(agent)
+          const { childId } = await startSideConversation(
+            subagents, agent, arg, deps, signal, attachments, reservedChildId,
+          )
           // Stop this child's settlement notice at the parent inbox boundary;
           // the child remains visible in the sidechain panel.
           settlementSilence.noteChild(agent, childId)

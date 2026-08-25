@@ -12,17 +12,20 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
 
 type DeliveryMethod = 'followup' | 'steer' | 'inject'
 const DELIVERY_METHODS: readonly DeliveryMethod[] = ['followup', 'steer', 'inject']
 
 /** Per-plugin-instance settlement suppression face. */
 export interface SettlementSilence {
+  /** Reserve a child id before asynchronous child startup can settle. */
+  reserveChild(parent: Agent): SessionId
   /** Register and immediately protect the parent of one side child. */
   noteChild(parent: Agent, childId: SessionId): void
   /** Restore wrapped agents and remove the future-agent listener. */
@@ -99,6 +102,13 @@ export function createSettlementSilence(ctx: Context): SettlementSilence {
   const removeCreatedListener = ctx.on('agent/created', ({ agent }) => { protect(agent) })
 
   return {
+    reserveChild(parent): SessionId {
+      protect(parent)
+      const childId = SessionId(randomUUID())
+      children.add(childId)
+      saveChildren(children)
+      return childId
+    },
     noteChild(parent, childId): void {
       protect(parent)
       children.add(childId)
