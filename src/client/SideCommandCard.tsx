@@ -79,7 +79,7 @@ export function SideCommandCard({ node }: SideCommandCardProps): JSX.Element {
       style={{
         padding: '6px 10px',
         borderRadius: '8px',
-        background: 'var(--ds-color-surface-2, #f2f3f5)',
+        background: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
         fontSize: '13px',
         lineHeight: '1.5',
       }}
