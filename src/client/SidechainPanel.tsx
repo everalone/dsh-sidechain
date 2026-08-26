@@ -541,6 +541,15 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
       {row.text !== '' && <TranscriptDisclosure row={row} streaming={streaming} t={t} />}
     </>
   }
+  if (row.kind === 'error') {
+    return (
+      <div style={{ ...styles.assistantRow, color: C.danger }}>
+        <div style={styles.assistantText}>
+          <MarkdownText text={row.text} streaming={false} codeLabels={codeLabels} fileMentions={fileMentions} />
+        </div>
+      </div>
+    )
+  }
   return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
 }
 

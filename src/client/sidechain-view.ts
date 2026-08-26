@@ -69,6 +69,7 @@ export type TranscriptRow =
     recall: boolean
     images?: readonly TranscriptImage[]
   }
+  | { kind: 'error'; seq: number; text: string }
   | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
 /** The fork boundary prompt's first line (marker for the side boundary message). */
@@ -272,6 +273,11 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
             ...(error === undefined ? {} : { detail: { error } }),
           })
         }
+        break
+      }
+      case 'turn/end': {
+        if (event.data.reason.kind !== 'error') break
+        rows.push({ kind: 'error', seq: event.seq, text: event.data.reason.error.message })
         break
       }
       default: {

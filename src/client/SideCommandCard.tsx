@@ -135,6 +135,16 @@ function BtwTranscript({ rows, running }: {
             </div>
           )
         }
+        if (row.kind === 'error') {
+          return (
+            <div key={`${row.kind}:${row.seq}:${index}`} style={{
+              color: 'var(--ds-color-danger, #e5484d)', fontSize: 13,
+              overflowWrap: 'anywhere',
+            }}>
+              <MarkdownText text={row.text} streaming={false} />
+            </div>
+          )
+        }
         return null
       })}
     </div>

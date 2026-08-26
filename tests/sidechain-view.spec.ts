@@ -179,6 +179,17 @@ describe('transcriptRows', () => {
     ))
     expect(rows).toEqual([])
   })
+
+  it('surfaces a failed turn so one-shot errors are visible', () => {
+    const rows = transcriptRows(ent(
+      event('session/end-seed', 1, {}),
+      event('turn/end', 2, {
+        turn: 1,
+        reason: { kind: 'error', error: { message: 'model unavailable', code: 'MODEL_NOT_FOUND' } },
+      }),
+    ))
+    expect(rows).toEqual([{ kind: 'error', seq: 2, text: 'model unavailable' }])
+  })
 })
 
 describe('resultViewSummary', () => {
