@@ -179,6 +179,17 @@ describe('transcriptRows', () => {
     ))
     expect(rows).toEqual([])
   })
+
+  it('surfaces a failed turn so one-shot errors are visible', () => {
+    const rows = transcriptRows(ent(
+      event('session/end-seed', 1, {}),
+      event('turn/end', 2, {
+        turn: 1,
+        reason: { kind: 'error', error: { message: 'model unavailable', code: 'MODEL_NOT_FOUND' } },
+      }),
+    ))
+    expect(rows).toEqual([{ kind: 'error', seq: 2, text: 'model unavailable' }])
+  })
 })
 
 describe('resultViewSummary', () => {
@@ -272,21 +283,22 @@ describe('fetchTranscript', () => {
   })
 
   it('walks backward to the seed boundary and cuts the inherited fork seed', async () => {
-    // Page 1 (tail): the child's own conversation, no end-seed.
+    // Page 1 (tail): a continuation marker followed by the newest turn.
     const history = vi.fn()
       .mockResolvedValueOnce({
         result: {
           ok: true,
           value: {
             events: [
-              { event: event('user/message', 90, { content: [{ type: 'text', text: '第二问' }] }) },
-              { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第二个答案' }] } }) },
+              { event: event('session/end-seed', 100, {}) },
+              { event: event('user/message', 110, { content: [{ type: 'text', text: '第二问' }] }) },
+              { event: event('assistant/message', 111, { message: { content: [{ type: 'text', text: '第二个答案' }] } }) },
             ],
-            hasMore: false,
+            hasMore: true,
           },
         },
       })
-      // Page 2 (older): inherited seed + the boundary marker.
+      // Page 2 (older): the initial seed + boundary + first turn.
       .mockResolvedValueOnce({
         result: {
           ok: true,
@@ -294,6 +306,8 @@ describe('fetchTranscript', () => {
             events: [
               { event: event('session/end-seed', 80, {}) },
               { event: event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }) },
+              { event: event('user/message', 90, { content: [{ type: 'text', text: '第一问' }] }) },
+              { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第一个答案' }] } }) },
             ],
             hasMore: false,
           },
@@ -301,12 +315,14 @@ describe('fetchTranscript', () => {
       })
     const result = await fetchTranscript({ history } as never, ADDRESS)
     expect(history).toHaveBeenNthCalledWith(1, { sessionId: CHILD, maxMessages: 8 })
-    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 90 })
+    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 100 })
     // Only the child's own conversation survives the cut.
     expect(result).toEqual({
       rows: [
-        { kind: 'user', seq: 90, text: '第二问' },
-        { kind: 'assistant', seq: 91, text: '第二个答案' },
+        { kind: 'user', seq: 90, text: '第一问' },
+        { kind: 'assistant', seq: 91, text: '第一个答案' },
+        { kind: 'user', seq: 110, text: '第二问' },
+        { kind: 'assistant', seq: 111, text: '第二个答案' },
       ],
       produced: [],
     })

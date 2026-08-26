@@ -103,11 +103,13 @@ export function startSideConversation(
   deps: SideDeps,
   signal: AbortSignal,
   attachments: readonly ContentBlock[] = [],
+  childId?: SessionId,
 ): Promise<ContinuableStart> {
   const label = truncateLabel(question) || 'Side conversation'
   return subagents.startContinuable({
     provider: deps.providerName,
     label,
+    ...(childId === undefined ? {} : { childId }),
     request: {
       prompt: sidePrompt(question, 'side', attachments),
       parent,

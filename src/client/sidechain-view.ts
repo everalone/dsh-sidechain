@@ -7,9 +7,8 @@
  *
  * A sidechain child's log starts with the ENTIRE inherited parent history as
  * its fork seed (reference context). The mapping therefore cuts everything
- * up to the LAST `session/end-seed` event (the constructor seed marker) and
- * drops the fork's "Side conversation boundary" prompt row, so the panel
- * shows only the child's own side conversation.
+ * before the first "Side conversation boundary" prompt and its preceding
+ * seed marker, so continuation-turn seed markers do not hide older turns.
  *
  * Live streaming: `assistant/message` events only land when a step completes,
  * but `assistant/chunk` events stream token-level text and reasoning deltas.
@@ -69,6 +68,7 @@ export type TranscriptRow =
     recall: boolean
     images?: readonly TranscriptImage[]
   }
+  | { kind: 'error'; seq: number; text: string }
   | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
 /** The fork boundary prompt's first line (marker for the side boundary message). */
@@ -127,10 +127,28 @@ function lastSeedEnd(events: readonly SessionEvent[]): number {
   return -1
 }
 
+function isSideBoundaryEvent(event: SessionEvent): boolean {
+  return event.type === 'user/message'
+    && event.data.content.some(block => block.type === 'text' && block.text.startsWith(BOUNDARY_PREFIX))
+}
+
+/** Seed marker immediately before the child's first boundary prompt, or the
+ * latest marker for legacy logs without a boundary. */
+function transcriptSeedEnd(events: readonly SessionEvent[]): number {
+  const boundary = events.findIndex(isSideBoundaryEvent)
+  if (boundary >= 0) {
+    for (let i = boundary - 1; i >= 0; i--) {
+      if (events[i]?.type === 'session/end-seed') return i
+    }
+    return -1
+  }
+  return lastSeedEnd(events)
+}
+
 /**
  * Map a session log's history rows onto compact transcript rows: the
- * inherited fork seed is cut at the last `session/end-seed`, the boundary
- * prompt is dropped, `assistant/chunk` text deltas accumulate into a
+ * inherited fork seed is cut at the first boundary's preceding
+ * `session/end-seed`, the boundary prompt is dropped, `assistant/chunk` text deltas accumulate into a
  * streaming row per step (superseded by the assembled `assistant/message`),
  * and tool invocations render one expandable line each — the call's view,
  * raw arguments, and the paired result's view (matched by the result's
@@ -140,7 +158,7 @@ function lastSeedEnd(events: readonly SessionEvent[]): number {
  */
 export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
   const events = entries.map(entry => entry.event)
-  const seedEnd = lastSeedEnd(events)
+  const seedEnd = transcriptSeedEnd(events)
   const rows: TranscriptRow[] = []
   /** (turn, step, block, kind) key → index of its accumulating stream row. */
   const streamRows = new Map<string, number>()
@@ -274,6 +292,11 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         }
         break
       }
+      case 'turn/end': {
+        if (event.data.reason.kind !== 'error') break
+        rows.push({ kind: 'error', seq: event.seq, text: event.data.reason.error.message })
+        break
+      }
       default: {
         break
       }
@@ -302,7 +325,7 @@ export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
   // The same seed cut transcriptRows applies: a fresh child's tail window
   // contains the inherited parent history, whose write/edit calls would
   // otherwise leak the PARENT's produced files into this child's vocabulary.
-  const seedEnd = lastSeedEnd(entries.map(entry => entry.event))
+  const seedEnd = transcriptSeedEnd(entries.map(entry => entry.event))
   // Calls whose result failed produced nothing to open (ui-deliverables
   // policy: failed calls do not count).
   const failedCallIds = new Set<string>()
@@ -451,12 +474,9 @@ export async function fetchActivity(
 }
 
 /**
- * Per-child seed-boundary cache: the seq of the child's last
- * `session/end-seed` marker. Once the first walk locates it, every later read
- * needs at most ONE page — either the page contains the end-seed and the
- * normal cut applies, or the page is entirely the child's own content and the
- * cached boundary supplies the cut (a seq filter no-op). The dense inherited
- * seed is never re-downloaded after the first walk.
+ * Per-child seed-boundary cache: the seq of the marker before the child's
+ * first boundary. Once the first walk locates it, every later read needs at
+ * most ONE page and the dense inherited seed is never re-downloaded.
  */
 const seedBoundaryCache = new Map<string, number>()
 /** Child-owned history accumulated from cheap tail polls. */
@@ -517,16 +537,14 @@ async function hydrateTranscriptImages(
 
 /**
  * Page a child's log backwards from the tail in small windows until a window
- * contains the fork seed's closing marker (`session/end-seed`), then return
- * everything after that marker — the child's own conversation only.
+ * contains the first boundary prompt, then return everything after the seed
+ * marker before that prompt — the child's own conversation only.
  *
  * The host pages strictly backward (`beforeSeq` is an exclusive upper bound),
- * so there is no "start after the boundary" fetch: the first read of a child
- * walks back until a window contains the newest end-seed (usually the first
- * window; a long child's own conversation may need one more). The boundary
- * seq is then cached — later reads (the live polls) fetch one tail window and
- * cut with the cache. Overlap between pages is deduped by sequence, so an
- * inclusive `beforeSeq` contract on the host is harmless.
+ * so there is no "start after the boundary" fetch: the first read walks back
+ * until a window contains the boundary. Later reads fetch one tail window and
+ * cut with the cached seed marker. Overlap between pages is deduped by
+ * sequence, so an inclusive `beforeSeq` contract on the host is harmless.
  * @param sessions - the api client's sessions surface.
  * @param childSessionId - the child whose own conversation to read.
  * @param pageMessages - messages per backward page.
@@ -558,19 +576,30 @@ async function fetchSeedCutEntries(
       const fresh = olderThan === undefined
         ? events
         : events.filter(entry => entry.event.seq < olderThan)
-      const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
-      if (seedEnd >= 0) {
-        // The newest end-seed in this window is the operative boundary.
-        boundarySeq = fresh[seedEnd]!.event.seq
-        seedBoundaryCache.set(childSessionId, boundarySeq)
-        collected.unshift(...fresh.slice(seedEnd + 1))
-        break
-      }
       if (boundarySeq !== undefined) {
         // Cached boundary + a window without the marker: the window is
         // entirely the child's own content — the seq filter is a safe no-op.
         const boundary = boundarySeq
         collected.unshift(...fresh.filter(entry => entry.event.seq > boundary))
+        break
+      }
+      const boundaryIndex = fresh.findIndex(entry => isSideBoundaryEvent(entry.event))
+      if (boundaryIndex >= 0) {
+        for (let i = boundaryIndex - 1; i >= 0; i--) {
+          if (fresh[i]?.event.type !== 'session/end-seed') continue
+          boundarySeq = fresh[i]!.event.seq
+          seedBoundaryCache.set(childSessionId, boundarySeq)
+          break
+        }
+        collected.unshift(...fresh)
+        break
+      }
+      const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
+      if (seedEnd >= 0 && response.result.value.hasMore === false) {
+        // Legacy/no-boundary logs have no stronger ownership marker.
+        boundarySeq = fresh[seedEnd]!.event.seq
+        seedBoundaryCache.set(childSessionId, boundarySeq)
+        collected.unshift(...fresh.slice(seedEnd + 1))
         break
       }
       collected.unshift(...fresh)

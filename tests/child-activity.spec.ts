@@ -114,10 +114,9 @@ describe('resolveChildActivity', () => {
   })
 
   describe('settle-on-finish transitions', () => {
-    // The panel's settle effect only fires on the explicit running -> inactive
-    // transition. An early unknown -> inactive (catalog loaded after the
-    // child already ended) must not fire it, and these checks mirror the
-    // conditions the effect observes across renders.
+    // The panel's settle effect fires when an observed child becomes inactive
+    // from either running or unknown, so a fast child still gets one final
+    // transcript read after the catalog catches up.
     const transitions: ReadonlyArray<{
       label: string
       previous: ReturnType<typeof resolveChildActivity>
@@ -125,7 +124,7 @@ describe('resolveChildActivity', () => {
       expectSettle: boolean
     }> = [
       { label: 'running -> inactive', previous: 'running', current: 'inactive', expectSettle: true },
-      { label: 'unknown -> inactive (no settle)', previous: 'unknown', current: 'inactive', expectSettle: false },
+      { label: 'unknown -> inactive (settle)', previous: 'unknown', current: 'inactive', expectSettle: true },
       { label: 'unknown -> running (no settle)', previous: 'unknown', current: 'running', expectSettle: false },
       { label: 'inactive -> running (no settle)', previous: 'inactive', current: 'running', expectSettle: false },
       { label: 'running -> running (no settle)', previous: 'running', current: 'running', expectSettle: false },
@@ -134,10 +133,10 @@ describe('resolveChildActivity', () => {
 
     for (const { label, previous, current, expectSettle } of transitions) {
       it(`${label}`, () => {
-        // The settle effect's transition check is the mirror of the gate
-        // used by the card poll. We assert the boolean the effect uses so
-        // any future refactor that changes the gate is caught here.
-        const settled = previous === 'running' && current === 'inactive'
+        // Mirror the transition gate used by the panel so future changes
+        // cannot silently drop the final read.
+        const settled = current === 'inactive'
+          && (previous === 'running' || previous === 'unknown')
         expect(settled).toBe(expectSettle)
       })
     }

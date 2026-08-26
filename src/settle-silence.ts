@@ -6,23 +6,26 @@
  * Session log.
  *
  * Child identity is persisted under DSH_HOME so resumed parents still reject
- * notices from side children created before a restart. Only ids registered by
- * this plugin are suppressed; ordinary messages and other subagents use the
- * original Agent delivery methods unchanged.
+ * authored reports from side children created before a restart. Runtime
+ * settlement notices are always suppressed because they are bookkeeping, not
+ * user input; ordinary messages and other subagent reports remain unchanged.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
 
 type DeliveryMethod = 'followup' | 'steer' | 'inject'
 const DELIVERY_METHODS: readonly DeliveryMethod[] = ['followup', 'steer', 'inject']
 
 /** Per-plugin-instance settlement suppression face. */
 export interface SettlementSilence {
+  /** Reserve a child id before asynchronous child startup can settle. */
+  reserveChild(parent: Agent): SessionId
   /** Register and immediately protect the parent of one side child. */
   noteChild(parent: Agent, childId: SessionId): void
   /** Restore wrapped agents and remove the future-agent listener. */
@@ -64,7 +67,8 @@ interface SettlementSource {
 
 function isSideChildDelivery(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
   const source = message.source as SettlementSource | undefined
-  return (source?.kind === 'subagent-report' || source?.kind === 'subagent-settled')
+  if (source?.kind === 'subagent-settled') return true
+  return source?.kind === 'subagent-report'
     && source.senderSessionId !== undefined
     && children.has(source.senderSessionId as SessionId)
 }
@@ -99,6 +103,13 @@ export function createSettlementSilence(ctx: Context): SettlementSilence {
   const removeCreatedListener = ctx.on('agent/created', ({ agent }) => { protect(agent) })
 
   return {
+    reserveChild(parent): SessionId {
+      protect(parent)
+      const childId = SessionId(randomUUID())
+      children.add(childId)
+      saveChildren(children)
+      return childId
+    },
     noteChild(parent, childId): void {
       protect(parent)
       children.add(childId)
