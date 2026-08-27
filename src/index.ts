@@ -16,7 +16,7 @@ import z from '@deepseek-ai/schemastery'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { createSidechainCommands } from './commands.ts'
 import { SIDE_PERSONA } from './prompts.ts'
-import { createSettlementSilence } from './settle-silence.ts'
+import { createSettlementSilence, type SettlementNoticeScope } from './settle-silence.ts'
 import type { SideDeps } from './side.ts'
 
 export const name = 'dsh-sidechain'
@@ -31,12 +31,20 @@ export interface Config {
   persona: string
   /** Optional allow-list of tool names kept visible in side conversations. */
   readOnlyTools?: string[]
+  /**
+   * Which runtime `subagent-settled` notices to suppress: `all` (default)
+   * silences every child's settlement bookkeeping; `side-children` silences
+   * only this plugin's registered side children so orchestration workflows
+   * that depend on settlement delivery keep receiving them.
+   */
+  settlementSilence?: SettlementNoticeScope
 }
 
 export const Config: z<Config> = z.object({
   providerName: z.string().default('fork'),
   persona: z.string().default(SIDE_PERSONA),
   readOnlyTools: z.array(z.string()),
+  settlementSilence: z.union([z.const('all'), z.const('side-children')]).default('all'),
 })
 
 export function apply(ctx: Context, config: Config): () => void {
@@ -49,7 +57,7 @@ export function apply(ctx: Context, config: Config): () => void {
     ...(config.persona === '' ? {} : { persona: config.persona }),
     ...(toolFilter === undefined ? {} : { toolFilter }),
   }
-  const settlementSilence = createSettlementSilence(ctx)
+  const settlementSilence = createSettlementSilence(ctx, config.settlementSilence)
   // Commands are an optional surface: without a command registry the plugin
   // still loads harmlessly in minimal deployments.
   ctx.inject(['commands'], (commandCtx) => {
