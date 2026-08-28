@@ -47,7 +47,7 @@ function onlyPathWithBasename(paths: readonly string[], value: string): string |
  * the cwd, or equals the basename of exactly one produced path.
  * @param produced - produced file paths (first-seen order, unique).
  * @param cwd - the child session's workspace root (match + path base).
- * @param openPath - host opener for absolute paths (workspaces.openPath).
+ * @param openPath - host opener for absolute paths.
  * @returns the resolver.
  */
 export function fileMentionsFor(

@@ -11,7 +11,6 @@ const browserModulesStub = fileURLToPath(new URL('./tests/browser-modules.stub.t
 export default defineConfig({
   resolve: {
     alias: {
-      '@deepseek-ai/dsh-client-runtime/client': browserModulesStub,
       '@deepseek-ai/dsh-client-ui-primitives': browserModulesStub,
     },
   },

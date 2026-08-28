@@ -14,9 +14,9 @@
  * with a shimmer sweep on the running label (installed once via
  * panel-style.ts, reduced-motion safe).
  *
- * Data rides the runtime's live subagent catalog — `sessions.list` rows under
- * `subagentsByParent` — for membership, and `session.history` for conversation
- * content (no activation, no navigation).
+ * Data rides the alpha Session Controller's live subagent catalog —
+ * `sessions.list` rows under `subagentsByParent` — for membership, and Session
+ * Remote history for conversation content (no activation, no navigation).
  * While the selected child is running, a poll reads its transcript tail (the
  * host serves the live child's in-memory snapshot) and the transcript layer
  * accumulates it with prior rounds, so a `/side` or `/btw` run streams into
@@ -41,18 +41,20 @@ import {
   type CSSProperties, type PointerEvent as ReactPointerEvent,
 } from 'react'
 import type {
-  CommandNode, SessionId, SessionListState, SessionSummary, SubagentAddress,
-  SubagentCatalogSnapshot,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import type { SubagentCatalog } from '@deepseek-ai/dsh-client-connection/client'
+  CommandNode, ChatNode,
+} from '@deepseek-ai/dsh-client-ui-chat/client'
+import type {
+  SessionListState, SessionSummary, SubagentCatalogSnapshot,
+} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import {
   DisclosureRow, IconBranchOutline16, IconBrowseOutline16, IconChevronLeftOutline14, IconCloseOutline16,
-  IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
+  IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot,
   IconThinkOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
@@ -81,7 +83,7 @@ export interface SidechainPanelInjected {
   refresh(parentSessionId: SessionId): void
   /** Arm (true) or disarm (false) the live catalog membership feed. */
   setCatalogOpen(parentSessionId: SessionId, open: boolean): void
-  /** Open an absolute path on the host (workspaces.openPath). */
+  /** Open an absolute path through the Session Controller. */
   openPath(path: string): void
 }
 
@@ -112,9 +114,8 @@ export type SidechainRow =
   }
 
 /**
- * Resolve the catalog into display rows: child entries carry their host
- * label when present, falling back to the session summary's title, then the
- * session id; diagnostics pass through untouched.
+ * Resolve the catalog into display rows: child entries carry their durable
+ * label when present, falling back to the session title and then id.
  * @param catalog - the parent's catalog snapshot (absent while never fetched).
  * @param summaries - session list rows, used as the label fallback source.
  * @returns flat display rows in catalog order.
@@ -124,9 +125,7 @@ export function sidechainRows(
   summaries: Readonly<Record<SessionId, SessionSummary>>,
 ): SidechainRow[] {
   if (catalog === undefined) return []
-  // 0812's emitted runtime declaration loses the wire catalog fields from
-  // SubagentCatalogSnapshot; the runtime value still implements this contract.
-  return (catalog as SubagentCatalogSnapshot & SubagentCatalog).entries.map((entry): SidechainRow => {
+  return catalog.entries.map((entry): SidechainRow => {
     if (entry.kind === 'diagnostic') {
       return { kind: 'diagnostic', id: entry.id, reason: entry.reason }
     }
@@ -420,54 +419,28 @@ function ToolRow({ row, running, codeLabels }: {
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const detail: ToolDetail | undefined = row.detail
-  const callView = detail?.callView
-  const resultView = detail?.resultView
-  const terminal = callView?.card === 'terminal' || resultView?.card === 'terminal'
-  const resultText = resultView === undefined || resultView.card === 'terminal'
-    ? undefined
-    : resultViewSummary(resultView)
-  const inputText = prettyToolInput(
-    callView !== undefined && callView.card === 'generic' ? callView.rawInput : undefined,
-    detail?.arguments,
-  )
-  const expandable = detail !== undefined && (
-    terminal
-    || inputText !== undefined
-    || resultText !== undefined
-    || detail.error !== undefined
-  )
-  const title = callView !== undefined && callView.card !== 'terminal' ? callView.title : row.name
+  const resultText = detail?.result === undefined ? undefined : resultViewSummary(detail.result)
+  const inputText = prettyToolInput(undefined, detail?.arguments)
+  const expandable = inputText !== undefined || resultText !== undefined || detail?.error !== undefined
   return (
     <DisclosureRow
       icon={<StateDot state={row.failed ? 'error' : running ? 'ongoing' : 'done'} />}
-      title={title}
+      title={row.name}
       open={open}
       expandable={expandable}
       onToggle={() => { setOpen(value => !value) }}
       collapsedContent={row.failed ? ' ✗' : undefined}
     >
       <div style={styles.toolDetail}>
-        {terminal && callView?.card === 'terminal' ? (
-          <TerminalBlock
-            command={callView.title}
-            cwd={callView.cwd}
-            output={resultView !== undefined && resultView.card === 'terminal' ? resultView.output : undefined}
-            exitCode={resultView !== undefined && resultView.card === 'terminal' ? resultView.exitCode : undefined}
-            signal={resultView !== undefined && resultView.card === 'terminal' ? resultView.signal : undefined}
-            running={running}
-            maxLines={24}
-          />
-        ) : (
-          <>
-            {inputText !== undefined && (
-              <pre style={styles.toolArgs}>{inputText}</pre>
-            )}
-            {resultText !== undefined && (
-              <div style={{ margin: '4px 0' }}>
-                <MarkdownText text={resultText} streaming={false} codeLabels={codeLabels} />
-              </div>
-            )}
-          </>
+        {inputText !== undefined && <pre style={styles.toolArgs}>{inputText}</pre>}
+        {resultText !== undefined && (
+          <div style={{ margin: '4px 0' }}>
+            <MarkdownText
+              text={resultText}
+              streaming={false}
+              labels={{ code: codeLabels ?? { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' }}
+            />
+          </div>
         )}
         {detail?.error !== undefined && (
           <div style={{ ...styles.toolFailed, fontSize: 12, marginTop: 4 }}>
@@ -539,12 +512,13 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
   fileMentions: MarkdownFileMentions | undefined
   t: SidechainPanelProps['t']
 }): JSX.Element {
+  const labels = { code: codeLabels ?? { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' }
   if (row.kind === 'user') {
     return (
       <div style={styles.userRow}>
         {row.images !== undefined && <TranscriptImages images={row.images} />}
         {row.text !== '' && <div style={styles.userText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={streaming} labels={labels} fileMentions={fileMentions} />
         </div>}
       </div>
     )
@@ -554,7 +528,7 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
       <div style={styles.assistantRow}>
         {row.images !== undefined && <TranscriptImages images={row.images} />}
         {row.text !== '' && <div style={styles.assistantText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={streaming} labels={labels} fileMentions={fileMentions} />
         </div>}
       </div>
     )
@@ -569,12 +543,12 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
     return (
       <div style={{ ...styles.assistantRow, color: C.danger }}>
         <div style={styles.assistantText}>
-          <MarkdownText text={row.text} streaming={false} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={false} labels={labels} fileMentions={fileMentions} />
         </div>
       </div>
     )
   }
-  return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
+  return <ToolRow row={row} running={streaming && row.detail?.result === undefined} codeLabels={codeLabels} />
 }
 
 /** Poll interval for the selected child's transcript while it is running (ms). */
@@ -615,7 +589,7 @@ export function SidechainPanelToggle({ sessionId, useSessions, t }: SidechainPan
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSession, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
+  sessionId, useChat, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -648,7 +622,7 @@ export function SidechainPanel({
   // This host remains mounted in the blank-session composer, where command
   // rows and the header do not exist. Seed replayed commands, then reveal only
   // children created or settled after this session observer mounted.
-  const chatNodes = useSession(snapshot => snapshot.chat.nodes.values())
+  const chatNodes = useChat(snapshot => snapshot.nodes.values())
   const commands = useMemo(() => (chatNodes as readonly ChatNode[])
     .filter((node): node is ChatNode<'command'> => node.kind === 'command')
     .map((node): CommandNode => node.data), [chatNodes])

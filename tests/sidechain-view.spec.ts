@@ -5,14 +5,14 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import {
   blockText, fetchTranscript, mergeProduced, producedPaths, resetSeedBoundaryCache,
   resultViewSummary, sendPrompt, transcriptRows,
 } from '../src/client/sidechain-view'
 import type { TranscriptEntry } from '../src/client/sidechain-view'
 
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 const CHILD = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914' as SessionId
 const ADDRESS: SubagentAddress = { parentSessionId: 'parent-1' as SessionId, childSessionId: CHILD, mode: 'continuable' }
@@ -21,7 +21,7 @@ function event(type: SessionEvent['type'], seq: number, data: Record<string, unk
   return { type, seq, time: 0, data } as SessionEvent
 }
 
-/** Wrap events into history rows (views absent unless provided). */
+/** Wrap events into expanded history rows. */
 function ent(...events: SessionEvent[]): TranscriptEntry[] {
   return events.map(event => ({ event }))
 }
@@ -93,25 +93,22 @@ describe('transcriptRows', () => {
     }])
   })
 
-  it('attaches the call and result views to the paired row', () => {
+  it('attaches alpha tool-result content to the paired row', () => {
     const rows = transcriptRows([
       {
         event: event('tool/call', 1, { name: 'bash', arguments: '{}', callId: 'c1' }),
-        view: { for: 'call', view: { card: 'terminal', title: 'ls' } },
       },
       {
         event: event('tool/result', 2, {
-          message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] },
+          message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'src' }] }] },
         }),
-        view: { for: 'result', view: { card: 'terminal', title: 'ls', output: 'src\n', exitCode: 0 } },
       },
     ])
     expect(rows).toEqual([{
       kind: 'tool', seq: 1, name: 'bash', failed: false,
       detail: {
         arguments: '{}',
-        callView: { card: 'terminal', title: 'ls' },
-        resultView: { card: 'terminal', title: 'ls', output: 'src\n', exitCode: 0 },
+        result: [{ type: 'text', text: 'src' }],
       },
     }])
   })
@@ -193,53 +190,39 @@ describe('transcriptRows', () => {
 })
 
 describe('resultViewSummary', () => {
-  it('summarizes diff, read, search, and web views', () => {
-    expect(resultViewSummary({ card: 'diff', diffs: [{ path: 'a.ts', oldText: 'x', newText: 'y\nz' }] }))
-      .toBe('a.ts · 3 行变更')
-    expect(resultViewSummary({ card: 'read', path: 'a.ts', offset: 1, lines: [{ number: 1, text: 'x' }], totalLines: 10 }))
-      .toBe('a.ts · 显示 1/10 行')
-    expect(resultViewSummary({ card: 'search', shape: 'paths', truncated: false, total: 2, paths: ['a.ts', 'b.ts'] }))
-      .toBe('2 个路径')
-    expect(resultViewSummary({
-      card: 'search', shape: 'matches', truncated: false, total: 1,
-      files: [{ path: 'a.ts', matches: [{ lineNumber: 1, line: 'x' }] }],
-    })).toBe('1 个文件 · 1 处匹配')
-    expect(resultViewSummary({ card: 'web', kind: 'search', sources: [{ url: 'https://x' }], truncated: false }))
-      .toBe('1 个来源')
-    expect(resultViewSummary({ card: 'web', kind: 'fetch', url: 'https://x', statusCode: 200, truncated: false }))
-      .toBe('https://x · HTTP 200')
-    expect(resultViewSummary({ card: 'generic', content: [{ type: 'text', text: '结果' }] })).toBe('结果')
-    expect(resultViewSummary({ card: 'terminal', output: 'x' })).toBeUndefined()
+  it('summarizes alpha tool-result content', () => {
+    expect(resultViewSummary([{ type: 'text', text: '结果' }])).toBe('结果')
+    expect(resultViewSummary([])).toBeUndefined()
   })
 })
 
 describe('producedPaths', () => {
   it('collects diff and edit-call locations in first-seen order, deduped', () => {
     const entries = [
-      { event: event('tool/call', 1, { name: 'write', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'Write a', diffs: [], locations: [{ path: 'src/a.ts' }] } } },
-      { event: event('tool/call', 2, { name: 'edit', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Edit', kind: 'edit' as const, locations: [{ path: 'src/b.ts' }, { path: 'src/a.ts' }] } } },
-      { event: event('tool/call', 3, { name: 'read', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'Read', kind: 'read' as const, locations: [{ path: 'src/c.ts' }] } } },
+      { event: event('tool/call', 1, { name: 'write', arguments: '{"file_path":"src/a.ts"}' }) },
+      { event: event('tool/call', 2, { name: 'edit', arguments: '{"file_path":"src/b.ts","path":"src/a.ts"}' }) },
+      { event: event('tool/call', 3, { name: 'read', arguments: '{"path":"src/c.ts"}' }) },
     ]
     expect(producedPaths(entries)).toEqual(['src/a.ts', 'src/b.ts'])
   })
 
   it('cuts the inherited seed and excludes failed calls', () => {
     const entries = [
-      { event: event('tool/call', 1, { name: 'write', arguments: '{}', callId: 'p1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'p', diffs: [], locations: [{ path: 'parent-only.ts' }] } } },
+      { event: event('tool/call', 1, { name: 'write', arguments: '{"file_path":"parent-only.ts"}', callId: 'p1' }) },
       { event: event('session/end-seed', 2, {}) },
-      { event: event('tool/call', 3, { name: 'write', arguments: '{}', callId: 'c1' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'failed.ts' }] } } },
+      { event: event('tool/call', 3, { name: 'write', arguments: '{"file_path":"failed.ts"}', callId: 'c1' }) },
       { event: event('tool/result', 4, { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }, error: { name: 'E', code: 'C' } }) },
-      { event: event('tool/call', 5, { name: 'write', arguments: '{}', callId: 'c2' }), view: { for: 'call' as const, view: { card: 'diff' as const, title: 'c', diffs: [], locations: [{ path: 'made.ts' }] } } },
+      { event: event('tool/call', 5, { name: 'write', arguments: '{"file_path":"made.ts"}', callId: 'c2' }) },
       { event: event('tool/result', 6, { message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [] }] } }) },
     ]
     expect(producedPaths(entries)).toEqual(['made.ts'])
   })
 
-  it('ignores result views, missing views, and non-mutation kinds', () => {
+  it('ignores missing paths and non-mutation kinds', () => {
     const entries = [
-      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }), view: { for: 'result' as const, view: { card: 'diff' as const, title: 'x', diffs: [] } } },
+      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }) },
       { event: event('tool/call', 2, { name: 'y', arguments: '{}' }) },
-      { event: event('tool/call', 3, { name: 'z', arguments: '{}' }), view: { for: 'call' as const, view: { card: 'generic' as const, title: 'z', kind: 'execute' as const } } },
+      { event: event('tool/call', 3, { name: 'z', arguments: '{"path":"z.ts"}' }) },
     ]
     expect(producedPaths(entries)).toEqual([])
   })
@@ -258,21 +241,31 @@ describe('fetchTranscript', () => {
     resetSeedBoundaryCache()
   })
 
-  it('maps the seed-cut history tail to rows via session.history', async () => {
-    const history = vi.fn(() => Promise.resolve({
-      result: {
-        ok: true,
-        value: {
-          events: [
-            { event: event('user/message', 1, { content: [{ type: 'text', text: '嗨' }] }) },
-            { event: event('assistant/message', 2, { message: { content: [{ type: 'text', text: '你好' }] } }) },
-          ],
-          hasMore: false,
-        },
-      },
-    }))
-    const result = await fetchTranscript({ history } as never, ADDRESS)
-    expect(history).toHaveBeenCalledWith({ sessionId: CHILD, maxMessages: 8 })
+  const record = (event: SessionEvent): { type: 'event'; event: SessionEvent } => ({ type: 'event', event })
+  const snapshot = (records: readonly { type: 'event'; event: SessionEvent }[], hasMore: boolean) => ({
+    type: 'snapshot' as const, cursor: 200, records, hasMore, header: {}, projections: {},
+  })
+  const remote = (
+    followSnapshots: readonly ReturnType<typeof snapshot>[],
+    pages: readonly { records: readonly { type: 'event'; event: SessionEvent }[]; hasMore: boolean }[],
+  ) => {
+    const followQueue = [...followSnapshots]
+    const pageQueue = [...pages]
+    const follow = vi.fn(async function* () { yield followQueue.shift()! })
+    const page = vi.fn(async () => ({ ok: true as const, value: pageQueue.shift()! }))
+    return { follow, page }
+  }
+
+  it('maps the alpha follow snapshot to transcript rows', async () => {
+    const sessions = remote([snapshot([
+      record(event('user/message', 1, { content: [{ type: 'text', text: '嗨' }] })),
+      record(event('assistant/message', 2, { message: { content: [{ type: 'text', text: '你好' }] } })),
+    ], false)], [])
+    const result = await fetchTranscript(sessions as never, ADDRESS)
+    expect(sessions.follow).toHaveBeenCalledWith({
+      address: { kind: 'subagent', parentSessionId: ADDRESS.parentSessionId, childSessionId: CHILD, mode: 'continuable' },
+      maxMessages: 8,
+    })
     expect(result).toEqual({
       rows: [
         { kind: 'user', seq: 1, text: '嗨' },
@@ -282,40 +275,37 @@ describe('fetchTranscript', () => {
     })
   })
 
+  it('expands alpha packed assistant chunks before rendering', async () => {
+    const sessions = remote([snapshot([
+      record(event('session/end-seed', 1, {})),
+      {
+        type: 'chunks',
+        event: {
+          type: 'chunkrow/text-chunks', seq: 2, time: 0,
+          data: { turn: 1, step: 1, index: 0, dt: [1], texts: ['你', '好'] },
+        },
+      } as never,
+    ], false)], [])
+    const result = await fetchTranscript(sessions as never, ADDRESS)
+    expect(result?.rows).toEqual([{ kind: 'assistant', seq: 2, text: '你好' }])
+  })
+
   it('walks backward to the seed boundary and cuts the inherited fork seed', async () => {
     // Page 1 (tail): a continuation marker followed by the newest turn.
-    const history = vi.fn()
-      .mockResolvedValueOnce({
-        result: {
-          ok: true,
-          value: {
-            events: [
-              { event: event('session/end-seed', 100, {}) },
-              { event: event('user/message', 110, { content: [{ type: 'text', text: '第二问' }] }) },
-              { event: event('assistant/message', 111, { message: { content: [{ type: 'text', text: '第二个答案' }] } }) },
-            ],
-            hasMore: true,
-          },
-        },
-      })
-      // Page 2 (older): the initial seed + boundary + first turn.
-      .mockResolvedValueOnce({
-        result: {
-          ok: true,
-          value: {
-            events: [
-              { event: event('session/end-seed', 80, {}) },
-              { event: event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }) },
-              { event: event('user/message', 90, { content: [{ type: 'text', text: '第一问' }] }) },
-              { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第一个答案' }] } }) },
-            ],
-            hasMore: false,
-          },
-        },
-      })
-    const result = await fetchTranscript({ history } as never, ADDRESS)
-    expect(history).toHaveBeenNthCalledWith(1, { sessionId: CHILD, maxMessages: 8 })
-    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 100 })
+    const sessions = remote([snapshot([
+      record(event('session/end-seed', 100, {})),
+      record(event('user/message', 110, { content: [{ type: 'text', text: '第二问' }] })),
+      record(event('assistant/message', 111, { message: { content: [{ type: 'text', text: '第二个答案' }] } })),
+    ], true)], [{
+      records: [
+        record(event('session/end-seed', 80, {})),
+        record(event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] })),
+        record(event('user/message', 90, { content: [{ type: 'text', text: '第一问' }] })),
+        record(event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第一个答案' }] } })),
+      ], hasMore: false,
+    }])
+    const result = await fetchTranscript(sessions as never, ADDRESS)
+    expect(sessions.page).toHaveBeenCalledWith(expect.objectContaining({ throughSeq: 200, beforeSeq: 100 }))
     // Only the child's own conversation survives the cut.
     expect(result).toEqual({
       rows: [
@@ -329,27 +319,14 @@ describe('fetchTranscript', () => {
   })
 
   it('dedupes overlapping page boundaries when the host page is inclusive', async () => {
-    const history = vi.fn()
-      .mockResolvedValueOnce({
-        result: { ok: true, value: {
-          events: [
-            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
-            { event: event('user/message', 92, { content: [{ type: 'text', text: '问' }] }) },
-          ],
-          hasMore: false,
-        } },
-      })
-      // Overlapping page: repeats seq 90 before the seed boundary.
-      .mockResolvedValueOnce({
-        result: { ok: true, value: {
-          events: [
-            { event: event('session/end-seed', 80, {}) },
-            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
-          ],
-          hasMore: false,
-        } },
-      })
-    const result = await fetchTranscript({ history } as never, ADDRESS)
+    const sessions = remote([snapshot([
+      record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] })),
+      record(event('user/message', 92, { content: [{ type: 'text', text: '问' }] })),
+    ], true)], [{
+      records: [record(event('session/end-seed', 80, {})), record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }))],
+      hasMore: false,
+    }])
+    const result = await fetchTranscript(sessions as never, ADDRESS)
     expect(result).toEqual({
       rows: [
         { kind: 'user', seq: 90, text: '旧问' },
@@ -361,38 +338,11 @@ describe('fetchTranscript', () => {
 
   it('reuses the cached seed boundary — later reads fetch one page only', async () => {
     // First read: the walk locates the boundary (page 2 has the end-seed).
-    const history = vi.fn()
-      .mockResolvedValueOnce({
-        result: { ok: true, value: {
-          events: [
-            { event: event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }) },
-            { event: event('assistant/message', 91, { message: { content: [{ type: 'text', text: '旧答' }] } }) },
-          ],
-          hasMore: false,
-        } },
-      })
-      .mockResolvedValueOnce({
-        result: { ok: true, value: {
-          events: [
-            { event: event('session/end-seed', 80, {}) },
-            { event: event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }) },
-          ],
-          hasMore: false,
-        } },
-      })
-      // Second read (cached): the tail window has no end-seed, but the cached
-      // boundary supplies the cut — one page, no walk.
-      .mockResolvedValueOnce({
-        result: { ok: true, value: {
-          events: [
-            { event: event('user/message', 92, { content: [{ type: 'text', text: '新问' }] }) },
-            { event: event('assistant/message', 93, { message: { content: [{ type: 'text', text: '新答' }] } }) },
-          ],
-          hasMore: false,
-        } },
-      })
-    const sessions = { history } as never
-    const first = await fetchTranscript(sessions, ADDRESS)
+    const sessions = remote([
+      snapshot([record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] })), record(event('assistant/message', 91, { message: { content: [{ type: 'text', text: '旧答' }] } }))], true),
+      snapshot([record(event('user/message', 92, { content: [{ type: 'text', text: '新问' }] })), record(event('assistant/message', 93, { message: { content: [{ type: 'text', text: '新答' }] } }))], false),
+    ], [{ records: [record(event('session/end-seed', 80, {})), record(event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }))], hasMore: false }])
+    const first = await fetchTranscript(sessions as never, ADDRESS)
     expect(first).toEqual({
       rows: [
         { kind: 'user', seq: 90, text: '旧问' },
@@ -400,11 +350,10 @@ describe('fetchTranscript', () => {
       ],
       produced: [],
     })
-    expect(history).toHaveBeenNthCalledWith(2, { sessionId: CHILD, maxMessages: 8, beforeSeq: 90 })
+    expect(sessions.page).toHaveBeenCalledWith(expect.objectContaining({ beforeSeq: 90 }))
     // Cached: exactly one fetch, no beforeSeq walk.
     const second = await fetchTranscript(sessions, ADDRESS)
-    expect(history).toHaveBeenCalledTimes(3)
-    expect(history).toHaveBeenNthCalledWith(3, { sessionId: CHILD, maxMessages: 8 })
+    expect(sessions.follow).toHaveBeenCalledTimes(2)
     expect(second).toEqual({
       rows: [
         { kind: 'user', seq: 90, text: '旧问' },
@@ -416,55 +365,43 @@ describe('fetchTranscript', () => {
     })
   })
 
-  it('extracts the produced-file vocabulary from call views', async () => {
-    const history = vi.fn(() => Promise.resolve({
-      result: {
-        ok: true,
-        value: {
-          events: [
-            {
-              event: event('tool/call', 1, { name: 'write', arguments: '{}' }),
-              view: { for: 'call', view: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } },
-            },
-          ],
-          hasMore: false,
-        },
-      },
-    }))
-    const result = await fetchTranscript({ history } as never, ADDRESS)
+  it('extracts produced files from alpha tool arguments', async () => {
+    const sessions = remote([snapshot([record(event('tool/call', 1, { name: 'write', arguments: '{"file_path":"/w/src/a.ts"}' }))], false)], [])
+    const result = await fetchTranscript(sessions as never, ADDRESS)
     expect(result).toEqual({
       rows: [{
         kind: 'tool', seq: 1, name: 'write', failed: false,
-        detail: { arguments: '{}', callView: { card: 'diff', title: 'w', diffs: [], locations: [{ path: '/w/src/a.ts' }] } },
+        detail: { arguments: '{"file_path":"/w/src/a.ts"}' },
       }],
       produced: ['/w/src/a.ts'],
     })
   })
 
   it('returns null on business failure', async () => {
-    const history = vi.fn(() => Promise.resolve({ result: { ok: false, error: { code: 'x', message: 'x' } } }))
-    expect(await fetchTranscript({ history } as never, ADDRESS)).toBeNull()
+    const follow = vi.fn(async function* () { yield { type: 'error' as const } as never })
+    expect(await fetchTranscript({ follow } as never, ADDRESS)).toBeNull()
   })
 
   it('returns null on transport failure', async () => {
-    const history = vi.fn(() => Promise.reject(new Error('network')))
-    expect(await fetchTranscript({ history } as never, ADDRESS)).toBeNull()
+    const follow = vi.fn(async function* () { throw new Error('network') })
+    expect(await fetchTranscript({ follow } as never, ADDRESS)).toBeNull()
   })
 })
 
 describe('sendPrompt', () => {
   it('delivers a text block through subagent.prompt', async () => {
-    const prompt = vi.fn(() => Promise.resolve({ result: { ok: true } }))
+    const prompt = vi.fn(() => Promise.resolve({ ok: true }))
     const accepted = await sendPrompt({ prompt } as never, ADDRESS, '继续')
-    expect(prompt).toHaveBeenCalledWith({
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
       ...ADDRESS,
       content: [{ type: 'text', text: '继续' }],
-    })
+      requestId: expect.any(String),
+    }))
     expect(accepted).toBe(true)
   })
 
   it('returns false on rejection', async () => {
-    const prompt = vi.fn(() => Promise.resolve({ result: { ok: false, error: { code: 'x', message: 'x' } } }))
+    const prompt = vi.fn(() => Promise.resolve({ ok: false }))
     expect(await sendPrompt({ prompt } as never, ADDRESS, '继续')).toBe(false)
   })
 })

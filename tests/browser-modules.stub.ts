@@ -11,8 +11,3 @@ export const IconRightUpOutline14 = () => null
 export const IconThinkOutline14 = () => null
 export const MarkdownText = () => null
 export const StateDot = () => null
-export const TerminalBlock = () => null
-
-export function contextProvenance(): never {
-  throw new Error('mock contextProvenance explicitly before exercising context rows')
-}

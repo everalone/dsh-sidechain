@@ -3,8 +3,9 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { SessionId, SubagentCatalogSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SubagentCatalog } from '@deepseek-ai/dsh-client-connection/client'
+import type { SubagentCatalogSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentCatalog } from '@deepseek-ai/dsh-subagent/client'
 import { runningCount, sidechainRows } from '../src/client/SidechainPanel'
 
 const PARENT = 'parent-1' as SessionId

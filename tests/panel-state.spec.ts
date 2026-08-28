@@ -2,7 +2,7 @@
  * Unit tests for the module-scope sidechain panel visibility + selection store.
  */
 
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, openSidechainPanel,

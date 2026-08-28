@@ -6,8 +6,9 @@
  *
  */
 
-import type { CommandNode, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CommandNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /** Props supplied by the keyed command row. */
 export interface SideCommandCardProps {
@@ -16,6 +17,11 @@ export interface SideCommandCardProps {
 
 /** Command key → child mode carried by the host's success text marker. */
 export type SideCommandKind = 'side' | 'btw'
+
+const MARKDOWN_LABELS = {
+  code: { copyLabel: 'Copy', copiedLabel: 'Copied' },
+  footnotes: 'Footnotes',
+} as const
 
 /**
  * Resolve the created child session id from a settled command node, or
@@ -87,7 +93,7 @@ export function SideCommandCard({ node }: SideCommandCardProps): JSX.Element {
       <strong style={{ whiteSpace: 'nowrap', display: 'block', marginBottom: '2px' }}>/{node.name ?? kind}</strong>
       {/* The /btw answer and /side notice render as markdown (tables, code, lists). */}
       <div style={{ overflowX: 'auto' }}>
-        <MarkdownText text={label} streaming={false} />
+        <MarkdownText text={label} streaming={false} labels={MARKDOWN_LABELS} />
       </div>
     </div>
   )

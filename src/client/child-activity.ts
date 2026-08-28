@@ -1,4 +1,4 @@
-import type { SubagentCatalogSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SubagentCatalogSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 
 /**
  * Resolved activity of one side-conversation child. A tri-state, not a boolean:

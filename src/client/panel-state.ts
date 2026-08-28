@@ -11,7 +11,7 @@
  * half is a single bundle, so every import site sees the same instance.
  */
 
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /** Listener invoked on every visibility or selection transition. */
 export type SidechainPanelListener = () => void

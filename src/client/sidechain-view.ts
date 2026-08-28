@@ -1,8 +1,8 @@
 /**
  * Embedded side-conversation transcript model (browser half).
  *
- * The panel renders a child's conversation from `session.history`, which reads
- * the durable log WITHOUT activating the child or changing the current session.
+ * The panel renders a child's conversation from alpha Session Remote history,
+ * which reads the durable log without activating the child or changing the current session.
  *
  * A sidechain child's log starts with the ENTIRE inherited parent history as
  * its fork seed (reference context). The mapping therefore cuts everything
@@ -16,12 +16,12 @@
  * cache, so old rounds remain visible without re-reading the inherited seed.
  */
 
-import type { IApiClient } from '@deepseek-ai/dsh-host-apiproxy'
-import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { SessionRemote } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionAddress, SessionFollowFrame, SessionHistoryRecord } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
-import { contextProvenance } from '@deepseek-ai/dsh-client-runtime/client'
+import { decodeStorageRecord } from '@deepseek-ai/dsh-session/chunk-rows'
+import type { SubagentAddress, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent/client'
 import { lastActivity } from './sidechain-activity.ts'
 
 /**
@@ -35,12 +35,11 @@ export const TRANSCRIPT_PAGE_MESSAGES = 8
 export const ACTIVITY_PAGE_MESSAGES = 6
 export const ACTIVITY_PAGE_CAP = 4
 
-/** Detail attached to one tool row: host-computed render views (call +
- *  result) and the raw arguments, paired by the result's toolCallId. */
+/** Detail attached to one tool row from alpha's raw Session events. */
 export interface ToolDetail {
-  callView?: ToolCallView | undefined
-  resultView?: ToolResultView | undefined
   arguments?: string | undefined
+  result?: readonly ContentBlock[] | undefined
+  meta?: unknown
   error?: { name: string; code: string } | undefined
 }
 
@@ -146,10 +145,9 @@ function transcriptSeedEnd(events: readonly SessionEvent[]): number {
  * inherited fork seed is cut at the first boundary's preceding
  * `session/end-seed`, the boundary prompt is dropped, `assistant/chunk` text deltas accumulate into a
  * streaming row per step (superseded by the assembled `assistant/message`),
- * and tool invocations render one expandable line each — the call's view,
- * raw arguments, and the paired result's view (matched by the result's
- * `toolCallId`) ride the row as detail; a failing `tool/result` marks it.
- * @param entries - history rows (event + host-computed view) in seq order.
+ * and tool invocations render one expandable line each — raw arguments and
+ * paired result content ride the row as detail; a failing `tool/result` marks it.
+ * @param entries - expanded alpha history events in seq order.
  * @returns display rows in log order.
  */
 export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
@@ -163,7 +161,6 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   for (let i = 0; i < events.length; i++) {
     if (i <= seedEnd) continue
     const event = events[i] as SessionEvent
-    const view = entries[i]?.view
     switch (event.type) {
       case 'user/message': {
         const refs = imageRefs(event.data.content)
@@ -179,11 +176,10 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         if (sourceKind === undefined || sourceKind === 'user') {
           rows.push({ kind: 'user', seq: event.seq, text: displayText, ...images })
         } else {
-          const provenance = contextProvenance(source)
           rows.push({
             kind: 'context', seq: event.seq, text: displayText,
-            source: provenance.label,
-            recall: provenance.role === 'recall',
+            source: typeof sourceKind === 'string' ? sourceKind : null,
+            recall: sourceKind === 'recall' || sourceKind === 'context-recall',
             ...images,
           })
         }
@@ -251,7 +247,6 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
           failed: false,
           detail: {
             arguments: data.arguments,
-            ...(view !== undefined && view.for === 'call' ? { callView: view.view } : {}),
           },
         })
         break
@@ -273,7 +268,8 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
               failed,
               detail: {
                 ...row.detail,
-                ...(view !== undefined && view.for === 'result' ? { resultView: view.view } : {}),
+                ...(resultBlock?.content.length === 0 ? {} : { result: resultBlock?.content }),
+                ...(data.meta === undefined ? {} : { meta: data.meta }),
                 ...(error === undefined ? {} : { error }),
               },
             }
@@ -301,10 +297,9 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   return rows
 }
 
-/** One history row as session.history returns it (event + host-computed view). */
+/** One expanded alpha history event. */
 export interface TranscriptEntry {
   event: SessionEvent
-  view?: ToolEventView | undefined
 }
 
 /**
@@ -314,7 +309,7 @@ export interface TranscriptEntry {
  * (the shape `str_replace_editor`'s insert presents). Reads, deletes, and
  * plain terminal runs produce nothing. Paths keep first-seen order and
  * appear once.
- * @param entries - history rows (views are re-derived per read by the host).
+ * @param entries - expanded alpha history events.
  * @returns produced file paths.
  */
 export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
@@ -337,57 +332,29 @@ export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
   const seen = new Set<string>()
   for (let i = seedEnd + 1; i < entries.length; i++) {
     const entry = entries[i] as TranscriptEntry
-    const view = entry.view
-    if (view === undefined || view.for !== 'call') continue
-    const call = view.view
     if (entry.event.type !== 'tool/call' || failedCallIds.has(entry.event.data.callId)) continue
-    const locations = call.card === 'diff'
-      ? call.locations
-      : call.card === 'generic' && call.kind === 'edit'
-        ? call.locations
-        : undefined
-    if (locations === undefined) continue
-    for (const location of locations) {
-      if (seen.has(location.path)) continue
-      seen.add(location.path)
-      paths.push(location.path)
+    // Alpha keeps tool presentation in the client UI; recover common write
+    // and edit path fields so file mentions still work in this custom view.
+    if (!/(write|edit|replace|patch|create)/i.test(entry.event.data.name)) continue
+    try {
+      const args = JSON.parse(entry.event.data.arguments) as Record<string, unknown>
+      for (const key of ['file_path', 'filePath', 'path']) {
+        const path = args[key]
+        if (typeof path === 'string' && !seen.has(path)) {
+          seen.add(path)
+          paths.push(path)
+        }
+      }
+    } catch {
+      // Invalid tool arguments cannot name a file.
     }
   }
   return paths
 }
 
-/** One-line summary of a non-terminal result view, for the expanded tool row. */
-export function resultViewSummary(view: ToolResultView): string | undefined {
-  switch (view.card) {
-    case 'generic': {
-      return view.content === undefined ? undefined : blockText(view.content)
-    }
-    case 'diff': {
-      const paths = view.diffs.map(diff => diff.path)
-      const lines = view.diffs.reduce(
-        (total, diff) => total + diff.newText.split('\n').length + (diff.oldText === null ? 0 : diff.oldText.split('\n').length),
-        0,
-      )
-      return `${paths.join(', ')} · ${lines} 行变更`
-    }
-    case 'read': {
-      if (view.content !== undefined) return blockText(view.content)
-      return `${view.path} · 显示 ${view.lines.length}/${view.totalLines} 行`
-    }
-    case 'search': {
-      if (view.shape === 'paths') return `${view.paths.length} 个路径`
-      const files = view.files.length
-      const matches = view.files.reduce((total, file) => total + file.matches.length, 0)
-      return `${files} 个文件 · ${matches} 处匹配`
-    }
-    case 'web': {
-      if (view.kind === 'search') return `${view.sources.length} 个来源`
-      return `${view.url} · HTTP ${view.statusCode}`
-    }
-    case 'terminal': {
-      return undefined
-    }
-  }
+/** One-line summary of alpha tool-result content. */
+export function resultViewSummary(content: readonly ContentBlock[]): string | undefined {
+  return content.length === 0 ? undefined : blockText(content)
 }
 
 /**
@@ -409,27 +376,26 @@ export function mergeProduced(
 /**
  * Fetch a child's transcript.
  *
- * Reads through `session.history`, which resolves the session's preset scope
- * from its log (`presenterScopeFor`) so tool views — and thus the
- * produced-file vocabulary — are available even for cold (finished) children.
+ * Reads through alpha's `session.follow`/`session.page` Remote methods without
+ * activating the child or changing the current session.
  *
- * The child's log STARTS with the entire inherited parent history (fork
+ * The child's log starts with the entire inherited parent history (fork
  * seed), which can be tens of thousands of chunk events. A single large tail
  * window would ship the inherited seed on every poll, so the reader pages
  * backwards in small windows until a window contains the seed boundary,
  * then cuts there. Later reads fetch one tail page and merge those events into
  * the cached child transcript, retaining earlier rounds.
- * @param sessions - the api client's sessions surface.
+ * @param sessions - alpha's generated Session Remote surface.
  * @param address - durable parent/child address (only the child id is used).
  * @returns display rows plus the produced-file vocabulary, or null on
  *   transport/business failure.
  */
 export async function fetchTranscript(
-  sessions: IApiClient['sessions'],
+  sessions: SessionRemote,
   address: SubagentAddress,
 ): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
   const entries = await fetchSeedCutEntries(
-    sessions, address.childSessionId, TRANSCRIPT_PAGE_MESSAGES,
+    sessions, address, TRANSCRIPT_PAGE_MESSAGES,
   )
   if (entries === null) return null
   const previous = transcriptEntryCache.get(address.childSessionId) ?? []
@@ -455,11 +421,11 @@ export async function fetchTranscript(
  *   empty tail.
  */
 export async function fetchActivity(
-  sessions: IApiClient['sessions'],
+  sessions: SessionRemote,
   address: SubagentAddress,
 ): Promise<string | null> {
   const entries = await fetchSeedCutEntries(
-    sessions, address.childSessionId, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
+    sessions, address, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
   )
   if (entries === null) return null
   return lastActivity(transcriptRows(entries)) ?? null
@@ -483,7 +449,7 @@ export function resetSeedBoundaryCache(): void {
 }
 
 async function hydrateTranscriptImages(
-  sessions: IApiClient['sessions'],
+  sessions: SessionRemote,
   childSessionId: SubagentAddress['childSessionId'],
   rows: readonly TranscriptRow[],
 ): Promise<TranscriptRow[]> {
@@ -495,20 +461,18 @@ async function hydrateTranscriptImages(
   }
   if (refs.size === 0) return [...rows]
 
-  const attachment = sessions.attachment
-  if (typeof attachment !== 'function') return [...rows]
   await Promise.all([...refs].map(async ([id, ref]) => {
     if (imageUrlCache.has(id)) return
     try {
-      const response = await attachment.call(sessions, {
+      const response = await sessions.attachment({
         sessionId: childSessionId,
         attachmentId: ref.attachmentId,
       })
-      if (!response.result.ok) {
+      if (!response.ok) {
         imageUrlCache.set(id, null)
         return
       }
-      const data = response.result.value.data
+      const data = response.value.data
       imageUrlCache.set(id, data.startsWith('data:') ? data : `data:${ref.mediaType};base64,${data}`)
     } catch {
       imageUrlCache.set(id, null)
@@ -545,24 +509,48 @@ async function hydrateTranscriptImages(
  * @returns the seed-cut entries, or null on transport/business failure.
  */
 async function fetchSeedCutEntries(
-  sessions: IApiClient['sessions'],
-  childSessionId: string,
+  sessions: SessionRemote,
+  childAddress: SubagentAddress,
   pageMessages: number,
   pageCap?: number,
 ): Promise<readonly TranscriptEntry[] | null> {
+  const childSessionId = childAddress.childSessionId
   const cachedBoundary = seedBoundaryCache.get(childSessionId)
   const collected: TranscriptEntry[] = []
   let beforeSeq: number | undefined
   let boundarySeq = cachedBoundary
+  const address: SessionAddress = {
+    kind: 'subagent',
+    parentSessionId: childAddress.parentSessionId,
+    childSessionId,
+    mode: childAddress.mode,
+  }
+  let throughSeq: number | undefined
   try {
     for (let page = 0; page < (pageCap ?? Number.POSITIVE_INFINITY); page++) {
-      const response = await sessions.history({
-        sessionId: childSessionId as SubagentAddress['childSessionId'],
-        maxMessages: pageMessages,
-        ...(beforeSeq === undefined ? {} : { beforeSeq }),
-      })
-      if (!response.result.ok) return null
-      const events = response.result.value.events
+      let records: readonly SessionHistoryRecord[]
+      let hasMore: boolean
+      if (throughSeq === undefined) {
+        const iterator = sessions.follow({ address, maxMessages: pageMessages })[Symbol.asyncIterator]()
+        const first = await iterator.next()
+        await iterator.return?.()
+        if (first.done || first.value.type !== 'snapshot') return null
+        const snapshot = first.value as Extract<SessionFollowFrame, { type: 'snapshot' }>
+        throughSeq = snapshot.cursor
+        records = snapshot.records
+        hasMore = snapshot.hasMore
+      } else {
+        const response = await sessions.page({
+          address,
+          throughSeq,
+          maxMessages: pageMessages,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        if (!response.ok) return null
+        records = response.value.records
+        hasMore = response.value.hasMore
+      }
+      const events = expandHistoryRecords(records)
       if (events.length === 0) break
       const olderThan = collected.length > 0 ? collected[0]!.event.seq : undefined
       const fresh = olderThan === undefined
@@ -587,7 +575,7 @@ async function fetchSeedCutEntries(
         break
       }
       const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
-      if (seedEnd >= 0 && response.result.value.hasMore === false) {
+      if (seedEnd >= 0 && hasMore === false) {
         // Legacy/no-boundary logs have no stronger ownership marker.
         boundarySeq = fresh[seedEnd]!.event.seq
         seedBoundaryCache.set(childSessionId, boundarySeq)
@@ -595,6 +583,7 @@ async function fetchSeedCutEntries(
         break
       }
       collected.unshift(...fresh)
+      if (!hasMore) break
       if (fresh.length === 0) break
       beforeSeq = fresh[0]!.event.seq
     }
@@ -602,6 +591,27 @@ async function fetchSeedCutEntries(
     return null
   }
   return collected
+}
+
+/** Expand alpha's packed history rows at the Remote boundary. */
+function expandHistoryRecords(records: readonly SessionHistoryRecord[]): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = []
+  for (const record of records) {
+    if (record.type === 'event') {
+      entries.push({ event: record.event as unknown as SessionEvent })
+      continue
+    }
+    const packed = record.event
+    const type = packed.type.replace('chunkrow/', '')
+    const decoded = decodeStorageRecord({
+      type,
+      seq0: packed.seq,
+      time0: packed.time,
+      data: packed.data,
+    })
+    entries.push(...decoded.map(event => ({ event })))
+  }
+  return entries
 }
 
 /**
@@ -614,16 +624,23 @@ async function fetchSeedCutEntries(
  * @returns whether the prompt was accepted.
  */
 export async function sendPrompt(
-  subagents: IApiClient['subagents'],
+  subagents: { prompt: (request: {
+    requestId: SubagentPromptRequestId
+    parentSessionId: SubagentAddress['parentSessionId']
+    childSessionId: SubagentAddress['childSessionId']
+    mode: 'continuable'
+    content: ContentBlock[]
+  }) => Promise<{ ok: boolean }> },
   address: Extract<SubagentAddress, { mode: 'continuable' }>,
   text: string,
 ): Promise<boolean> {
   try {
     const response = await subagents.prompt({
+      requestId: crypto.randomUUID() as SubagentPromptRequestId,
       ...address,
       content: [{ type: 'text', text }] satisfies readonly ContentBlock[],
     })
-    return response.result.ok
+    return response.ok === true
   } catch {
     return false
   }

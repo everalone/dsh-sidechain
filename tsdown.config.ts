@@ -21,7 +21,20 @@ const PLATFORM_MODULES = [
 ] as const
 
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+const CLIENT_EXTERNALS: readonly string[] = [
+  ...PLATFORM_MODULES,
+  '@deepseek-ai/dsh-api-gateway/client',
+  '@deepseek-ai/dsh-api-remotes/client',
+  '@deepseek-ai/dsh-api-session-controller/client',
+  '@deepseek-ai/dsh-api-workspace-controller/client',
+  '@deepseek-ai/dsh-client-connection/client',
+  '@deepseek-ai/dsh-client-locale/client',
+  '@deepseek-ai/dsh-client-ui-chat/client',
+  '@deepseek-ai/dsh-client-ui-conversation/client',
+  '@deepseek-ai/dsh-client-ui-session/client',
+  '@deepseek-ai/dsh-client-ui-workspace/client',
+  '@deepseek-ai/dsh-subagent/client',
+]
 
 export default [
   {
