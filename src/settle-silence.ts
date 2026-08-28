@@ -6,9 +6,12 @@
  * Session log.
  *
  * Child identity is persisted under DSH_HOME so resumed parents still reject
- * authored reports from side children created before a restart. Runtime
- * settlement notices are always suppressed because they are bookkeeping, not
- * user input; ordinary messages and other subagent reports remain unchanged.
+ * authored reports from side children created before a restart. Settlement
+ * notice suppression is configurable: `all` (default, legacy behavior) drops
+ * every runtime `subagent-settled` notice as bookkeeping, while
+ * `side-children` drops only notices from children this plugin registered, so
+ * orchestration workflows that rely on settlement delivery (e.g. background
+ * subagent fan-out coordinated by the parent model) keep working.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -65,19 +68,40 @@ interface SettlementSource {
   senderSessionId?: string | undefined
 }
 
-function isSideChildDelivery(message: UserMessage, children: ReadonlySet<SessionId>): boolean {
-  const source = message.source as SettlementSource | undefined
-  if (source?.kind === 'subagent-settled') return true
-  return source?.kind === 'subagent-report'
-    && source.senderSessionId !== undefined
+/**
+ * Which `subagent-settled` notices to suppress: `all` silences the runtime's
+ * settlement bookkeeping for every child; `side-children` silences only
+ * children registered by this plugin and lets orchestration-owned children
+ * settle loudly into their parent.
+ */
+export type SettlementNoticeScope = 'all' | 'side-children'
+
+function isRegisteredSideChild(source: SettlementSource | undefined, children: ReadonlySet<SessionId>): boolean {
+  return source?.senderSessionId !== undefined
     && children.has(source.senderSessionId as SessionId)
+}
+
+function isSideChildDelivery(
+  message: UserMessage,
+  children: ReadonlySet<SessionId>,
+  settledScope: SettlementNoticeScope,
+): boolean {
+  const source = message.source as SettlementSource | undefined
+  if (source?.kind === 'subagent-settled') {
+    return settledScope === 'all' || isRegisteredSideChild(source, children)
+  }
+  return source?.kind === 'subagent-report' && isRegisteredSideChild(source, children)
 }
 
 /**
  * Install the parent-inbox boundary for side settlement notices.
  * @param ctx - root plugin context, used to protect future/resumed agents.
+ * @param settledScope - which `subagent-settled` notices to suppress.
  */
-export function createSettlementSilence(ctx: Context): SettlementSilence {
+export function createSettlementSilence(
+  ctx: Context,
+  settledScope: SettlementNoticeScope = 'all',
+): SettlementSilence {
   const children = loadChildren()
   const patched = new Map<Agent, ReadonlyMap<DeliveryMethod, PropertyDescriptor | undefined>>()
 
@@ -91,7 +115,7 @@ export function createSettlementSilence(ctx: Context): SettlementSilence {
         configurable: true,
         writable: true,
         value(message: UserMessage): void {
-          if (!isSideChildDelivery(message, children)) original.call(agent, message)
+          if (!isSideChildDelivery(message, children, settledScope)) original.call(agent, message)
         },
       })
     }

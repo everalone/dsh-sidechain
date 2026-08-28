@@ -58,6 +58,7 @@ dsh plugin --profile web remove @dsh-external/dsh-sidechain
 | `providerName` | `fork` | 用于创建子会话的 subagent provider |
 | `persona` | 内置侧会话 persona | 侧会话的行为约束；空字符串表示沿用部署 persona |
 | `readOnlyTools` | 未设置 | 可选工具 allow-list，例如 `['read', 'grep', 'glob']` |
+| `settlementSilence` | `all` | `subagent-settled` 通知的抑制范围：`all` = 静默所有子会话的结算簿记通知（历史行为）；`side-children` = 只静默本插件注册的侧会话子级，编排工作流（如 subagent 并行下放）的完成通知正常投递给父会话 |
 
 配置示例：
 
