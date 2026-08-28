@@ -41,7 +41,7 @@ function fakeAgent(): Agent & { delivered: { method: string; message: UserMessag
   } as unknown as Agent & { delivered: { method: string; message: UserMessage }[] }
 }
 
-function setup(liveAgents: Agent[] = [], settledScope?: 'all' | 'side-children') {
+function setup(liveAgents: Agent[] = []) {
   const created = { handler: undefined as ((payload: { agent: Agent }) => void) | undefined }
   const dispose = vi.fn()
   const ctx = {
@@ -51,7 +51,7 @@ function setup(liveAgents: Agent[] = [], settledScope?: 'all' | 'side-children')
       return dispose
     },
   }
-  return { silence: createSettlementSilence(ctx as never, settledScope), created, dispose }
+  return { silence: createSettlementSilence(ctx as never), created, dispose }
 }
 
 beforeEach(() => {
@@ -81,7 +81,7 @@ describe('createSettlementSilence', () => {
     expect(parent.delivered).toEqual([])
   })
 
-  it('passes ordinary user messages but drops any runtime settlement notice', () => {
+  it('passes ordinary messages and notices from unregistered children', () => {
     const { silence } = setup()
     const parent = fakeAgent()
     silence.noteChild(parent, SIDE)
@@ -89,6 +89,7 @@ describe('createSettlementSilence', () => {
     parent.steer(notice(OTHER))
     expect(parent.delivered).toEqual([
       { method: 'followup', message: userMessage('继续干活') },
+      { method: 'steer', message: notice(OTHER) },
     ])
   })
 
@@ -124,51 +125,6 @@ describe('createSettlementSilence', () => {
     parent.followup(notice(SIDE))
     expect(parent.delivered).toEqual([{ method: 'followup', message: notice(SIDE) }])
     expect(dispose).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('createSettlementSilence with settlementSilence: side-children', () => {
-  it('still drops settlement notices from registered side children', () => {
-    const { silence } = setup([], 'side-children')
-    const parent = fakeAgent()
-    silence.noteChild(parent, SIDE)
-    parent.followup(notice(SIDE))
-    parent.steer(notice(SIDE))
-    parent.inject(notice(SIDE))
-    expect(parent.delivered).toEqual([])
-  })
-
-  it('still drops explicit reports from registered side children', () => {
-    const { silence } = setup([], 'side-children')
-    const parent = fakeAgent()
-    silence.noteChild(parent, SIDE)
-    parent.followup(notice(SIDE, 'subagent-report'))
-    expect(parent.delivered).toEqual([])
-  })
-
-  it('passes settlement notices from children this plugin never registered', () => {
-    const { silence } = setup([], 'side-children')
-    const parent = fakeAgent()
-    silence.noteChild(parent, SIDE)
-    parent.steer(notice(OTHER))
-    parent.followup(notice(OTHER))
-    expect(parent.delivered).toEqual([
-      { method: 'steer', message: notice(OTHER) },
-      { method: 'followup', message: notice(OTHER) },
-    ])
-  })
-
-  it('keeps the registry durable for side-children scoping across restarts', () => {
-    const first = setup([], 'side-children')
-    first.silence.noteChild(fakeAgent(), SIDE)
-    first.silence.dispose()
-
-    const restarted = setup([], 'side-children')
-    const resumedParent = fakeAgent()
-    restarted.created.handler?.({ agent: resumedParent })
-    resumedParent.followup(notice(SIDE))
-    resumedParent.followup(notice(OTHER))
-    expect(resumedParent.delivered).toEqual([{ method: 'followup', message: notice(OTHER) }])
   })
 })
 
