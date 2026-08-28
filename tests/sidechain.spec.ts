@@ -240,7 +240,7 @@ describe('/btw (non-blocking one-shot side question)', () => {
 
     expect(result.kind).toBe('error')
     expect(result.kind === 'error' && result.text).toContain('provider "fork" is not registered')
-    expect(result.kind === 'error' && result.text).toContain('@deepseek-ai/dsh-subagent-fork')
+    expect(result.kind === 'error' && result.text).toContain('@deepseek-ai/dsh-subagent-fork-in-process')
     expect(subagents.start).not.toHaveBeenCalled()
   })
 

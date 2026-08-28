@@ -1,9 +1,8 @@
 /**
  * Embedded side-conversation transcript model (browser half).
  *
- * The panel renders a child's conversation from `subagent.history` — the
- * catalog's message-aligned transcript RPC, which reads the durable log
- * WITHOUT activating the child or changing the current session.
+ * The panel renders a child's conversation from `session.history`, which reads
+ * the durable log WITHOUT activating the child or changing the current session.
  *
  * A sidechain child's log starts with the ENTIRE inherited parent history as
  * its fork seed (reference context). The mapping therefore cuts everything
@@ -36,9 +35,6 @@ export const TRANSCRIPT_PAGE_MESSAGES = 8
 export const ACTIVITY_PAGE_MESSAGES = 6
 export const ACTIVITY_PAGE_CAP = 4
 
-/** One compact transcript row rendered in the panel. `seq` is the source
- *  event's log sequence — stable row identity for React keys across polls
- *  (streaming caches ride the key, so window slides must not re-key rows). */
 /** Detail attached to one tool row: host-computed render views (call +
  *  result) and the raw arguments, paired by the result's toolCallId. */
 export interface ToolDetail {
@@ -305,7 +301,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   return rows
 }
 
-/** One history row as subagent.history returns it (event + host-computed view). */
+/** One history row as session.history returns it (event + host-computed view). */
 export interface TranscriptEntry {
   event: SessionEvent
   view?: ToolEventView | undefined
@@ -396,8 +392,8 @@ export function resultViewSummary(view: ToolResultView): string | undefined {
 
 /**
  * Union two produced-file vocabularies, keeping first-seen order. The panel
- * accumulates across polls: a produced path whose call row slides out of the
- * 20-message tail window must keep its mentions working.
+ * accumulates across polls so a produced path remains usable after its call
+ * row slides out of the current tail window.
  * @param previous - the accumulated vocabulary (may be empty on first fetch).
  * @param next - the current window's vocabulary.
  * @returns the union in first-seen order.
@@ -413,20 +409,16 @@ export function mergeProduced(
 /**
  * Fetch a child's transcript.
  *
- * Reads through `session.history` rather than `subagent.history`: the
- * subagent path serves history without a presenter scope, so tool events
- * carry no render views (and no produced-file locations); the session path
- * resolves the session's preset scope from its log (`presenterScopeFor`),
- * so views — and thus the produced-file vocabulary — are available even for
- * cold (finished) children.
+ * Reads through `session.history`, which resolves the session's preset scope
+ * from its log (`presenterScopeFor`) so tool views — and thus the
+ * produced-file vocabulary — are available even for cold (finished) children.
  *
  * The child's log STARTS with the entire inherited parent history (fork
- * seed), which can be tens of thousands of chunk events. A single large
- * tail window would ship megabytes of seed per poll (measured: 20 messages
- * → ~7000 events, 1.4 MB, ~8 s on a long parent session). Instead the read
- * pages backwards in small windows until a window contains the seed
- * boundary, then cuts there. Later reads fetch one tail page and merge those
- * events into the cached child transcript, retaining earlier rounds.
+ * seed), which can be tens of thousands of chunk events. A single large tail
+ * window would ship the inherited seed on every poll, so the reader pages
+ * backwards in small windows until a window contains the seed boundary,
+ * then cuts there. Later reads fetch one tail page and merge those events into
+ * the cached child transcript, retaining earlier rounds.
  * @param sessions - the api client's sessions surface.
  * @param address - durable parent/child address (only the child id is used).
  * @returns display rows plus the produced-file vocabulary, or null on

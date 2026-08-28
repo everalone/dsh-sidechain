@@ -1,7 +1,7 @@
 /**
  * Pinned model-visible text for side conversations (Codex `/side` & `/btw`
- * semantics: a side conversation is an ephemeral fork used for a quick
- * question while keeping the primary thread focused).
+ * semantics: a side conversation is an isolated fork used for a quick question
+ * or an ongoing thread while keeping the primary thread focused).
  *
  * These strings are model-facing contracts: change them only with intent, and
  * keep tests asserting the exact sentences that carry the behavioral rules.

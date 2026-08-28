@@ -1,6 +1,6 @@
 /**
- * dsh-sidechain plugin: `/side` and `/btw` — side conversations in an
- * ephemeral fork of the current session (Codex `/side` & `/btw` semantics).
+ * dsh-sidechain plugin: `/side` and `/btw` — isolated side conversations in a
+ * fork of the current session (Codex `/side` & `/btw` semantics).
  *
  * Both commands drive the forked subagent backend: the child inherits the
  * parent's completed conversation turns as reference context only (boundary

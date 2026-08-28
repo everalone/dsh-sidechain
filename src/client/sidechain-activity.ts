@@ -2,7 +2,7 @@
  * Activity-line derivation for running side-conversation rows (browser half).
  *
  * While a child is running, its catalog row shows one live preview line under
- * the label — the child's latest assistant text, or (while it only works) the
+ * the label — the child's latest assistant text, or (when no text is available) the
  * last tool call summarized as `🔧 <tool> · <salient arg>` — derived from a
  * light transcript-tail fetch. Pure module: everything here is unit-testable
  * without React or the runtime.

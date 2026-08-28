@@ -1,6 +1,6 @@
 # dsh-sidechain
 
-DSH 侧会话插件。它通过 fork 当前会话创建独立子会话，让用户在不中断主线程的情况下发起一次性问题或持续对话。
+DSH 侧会话插件。它通过 fork 当前会话创建隔离子会话，让用户在不中断主线程的情况下发起一次性问题或持续对话。
 
 当前版本适配公开版 DSH npm `0.0.1-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.0-rc.8`、`0.1.1-rc.1` 和 `0.1.1-rc.2`。在已验证的 `0.1.1-rc.2` 中，`/side` 与 `/btw` 会转发命令输入中的图片附件，并在侧栏显示持久化图片。
 
@@ -23,12 +23,12 @@ DSH 侧会话插件。它通过 fork 当前会话创建独立子会话，让用�
 
 ## 安装与卸载
 
-依赖 DSH 提供的 `dsh-subagent`、`dsh-subagent-fork` 和 `dsh-commands` 插件。默认 Web profile 已包含这些依赖。
+依赖 DSH 提供的 `@deepseek-ai/dsh-subagent`、`@deepseek-ai/dsh-subagent-fork-in-process` 和 `@deepseek-ai/dsh-commands`。默认 Web profile 已包含这些依赖。
 
 ### 安装
 
 ```sh
-dsh plugin --profile web add github:Buyi-wsgzg/dsh-sidechain
+dsh plugin --profile web add github:omdsh-dev/dsh-sidechain
 ```
 
 pnpm 10 及以上首次安装会提示允许 Git 依赖执行 `prepare`。按命令输出把插件键加入 Web profile 的 `pnpm-workspace.yaml`，然后重新执行安装命令。
@@ -81,7 +81,7 @@ dsh plugin --profile web remove @dsh-external/dsh-sidechain
 /btw 这个目录下哪个文件最大？
 ```
 
-命令立即返回，侧链面板自动打开并显示执行过程和答案。`/btw` 会话只读，不能继续追问。
+命令立即返回，侧链面板自动打开并显示执行过程和答案。`/btw` 只运行一轮，不能继续追问。
 
 持续侧会话：
 
@@ -110,7 +110,7 @@ dsh plugin --profile web remove @dsh-external/dsh-sidechain
 - 工具调用、结果和错误
 - Markdown、代码块、表格与公式
 
-`/side` 线程带输入框，可持续对话；`/btw` 线程为只读。面板只读取子会话日志，不会切换或激活主会话中的当前对话。
+`/side` 线程带输入框，可持续对话；`/btw` 线程不可继续发送消息。面板只读取子会话日志，不会切换或激活主会话中的当前对话。
 
 ## 会话隔离
 

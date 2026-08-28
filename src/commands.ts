@@ -1,6 +1,6 @@
 /**
  * Command definitions for `/side` and `/btw` (Codex semantics: both start a
- * side conversation in an ephemeral fork of the current session). Neither
+ * side conversation in a fork of the current session). Neither
  * command blocks the main session: the child runs in the background and its
  * transcript streams into the sidechain panel.
  */
@@ -24,13 +24,13 @@ export function createSidechainCommands(
   /** Loud hint when the configured provider is absent from the deployment. */
   const missingProvider = (): string | undefined => {
     if (subagents.getProvider(deps.providerName) !== undefined) return undefined
-    return `sidechain: provider "${deps.providerName}" is not registered — mount @deepseek-ai/dsh-subagent-fork (or set providerName in the plugin config).`
+    return `sidechain: provider "${deps.providerName}" is not registered — mount @deepseek-ai/dsh-subagent-fork-in-process (or set providerName in the plugin config).`
   }
 
   return [
     {
       name: 'side',
-      description: 'Start a side conversation in an ephemeral fork of the current session',
+      description: 'Start a side conversation in a fork of the current session',
       recordInput: false,
       input: { hint: '<question>', images: true },
       handler: async ({ agent, rawInput, attachments, signal }) => {
@@ -65,7 +65,7 @@ export function createSidechainCommands(
     },
     {
       name: 'btw',
-      description: 'Ask a quick question in an ephemeral fork of the current session',
+      description: 'Ask a quick question in a fork of the current session',
       // The question body is not persisted into the parent's command/run log:
       // the child session is the durable record (the panel reads it there).
       recordInput: false,

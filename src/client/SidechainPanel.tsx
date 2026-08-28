@@ -15,8 +15,8 @@
  * panel-style.ts, reduced-motion safe).
  *
  * Data rides the runtime's live subagent catalog — `sessions.list` rows under
- * `subagentsByParent` — for membership, and the catalog's `subagent.history`
- * transcript RPC for conversation content (no activation, no navigation).
+ * `subagentsByParent` — for membership, and `session.history` for conversation
+ * content (no activation, no navigation).
  * While the selected child is running, a poll reads its transcript tail (the
  * host serves the live child's in-memory snapshot) and the transcript layer
  * accumulates it with prior rounds, so a `/side` or `/btw` run streams into

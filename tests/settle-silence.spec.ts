@@ -1,6 +1,6 @@
 /**
- * Unit tests for settlement-notice silencing: side children's `subagent-settled`
- * notices are stopped before they enter the parent inbox, everything else passes.
+ * Unit tests for settlement-notice silencing: registered side-child reports and
+ * settlements stop before they enter the parent inbox, everything else passes.
  */
 
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -129,7 +129,7 @@ describe('createSettlementSilence', () => {
 })
 
 describe('durable child-id registry', () => {
-  it('persists recorded ids under DSH_HOME and reloads them', async () => {
+  it('persists recorded ids under DSH_HOME and reloads them', () => {
     const home = process.env.DSH_HOME!
     const first = setup()
     first.silence.noteChild(fakeAgent(), SIDE)
