@@ -40,6 +40,7 @@ import {
   useCallback, useEffect, useMemo, useRef, useState,
   type CSSProperties, type PointerEvent as ReactPointerEvent,
 } from 'react'
+import { createPortal } from 'react-dom'
 import type {
   CommandNode, ChatNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
@@ -1049,7 +1050,7 @@ export function SidechainPanel({
   const panelOpacity = entered ? 1 : 0
   return (
     <>
-      {mounted && (
+      {mounted && typeof document !== 'undefined' && createPortal(
         <aside
           ref={panelRef}
           style={{ ...styles.panel, width, transform: panelTransform, opacity: panelOpacity }}
@@ -1215,7 +1216,8 @@ export function SidechainPanel({
               {sendFailed && <div style={styles.error}>{t('view.sendFailed')}</div>}
             </div>
           )}
-        </aside>
+        </aside>,
+        document.body,
       )}
     </>
   )

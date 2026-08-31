@@ -25,7 +25,14 @@ import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
 
-export const inject = ['slots', 'sessions', 'locale', 'remote']
+export const inject = [
+  'slots',
+  'sessions',
+  'locale',
+  'remote',
+  'remote.session',
+  'remote.subagents',
+]
 
 export function apply(ctx: Context): void {
   const sessions = ctx.sessions

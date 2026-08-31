@@ -2,7 +2,7 @@
 
 DSH 侧会话插件。它通过 fork 当前会话创建隔离子会话，让用户在不中断主线程的情况下发起一次性问题或持续对话。
 
-当前分支适配 DSH `0.1.2-alpha.1`。该 alpha 尚未发布到 npm，开发和验证需要使用对应 tag 的 DeepSeek Harness 源码 workspace。
+当前分支适配 DSH `0.1.2-alpha.2`，依赖已发布到 npm。
 
 | 命令 | 用途 |
 |---|---|
@@ -31,7 +31,7 @@ DSH 侧会话插件。它通过 fork 当前会话创建隔离子会话，让用�
 dsh plugin --profile web add github:omdsh-dev/dsh-sidechain
 ```
 
-pnpm 10 及以上首次安装会提示允许 Git 依赖执行 `prepare`。按命令输出把插件键加入 Web profile 的 `pnpm-workspace.yaml`，然后重新执行安装命令。alpha 版本请先在 Harness workspace 中构建对应包，再加载插件。
+pnpm 10 及以上首次安装会提示允许 Git 依赖执行 `prepare`。按命令输出把插件键加入 Web profile 的 `pnpm-workspace.yaml`，然后重新执行安装命令。
 
 插件会向 Web profile 添加以下配置：
 
@@ -134,4 +134,4 @@ pnpm install
 pnpm check
 ```
 
-`pnpm check` 依次执行类型检查、测试和构建。当前 alpha 依赖未进入 npm registry，仓库 lockfile 不能独立解析这些包；本分支的验证使用 `dsh-v0.1.2-alpha.1` workspace 构建产物。
+`pnpm check` 依次执行类型检查、测试和构建。依赖固定到 DSH `0.1.2-alpha.2`，可直接从 npm registry 安装。
