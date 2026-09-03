@@ -4,6 +4,13 @@ DSH 侧会话插件。它通过 fork 当前会话创建隔离子会话，让用�
 
 当前分支适配 DSH `0.1.2-alpha.2`，依赖已发布到 npm。
 
+> **custom/improvements（本分支）**：基于 `compat/dsh-v0.1.2-alpha.2`（原作者 alpha.2 移植）的本地改进分支。
+> 相对上游的差异：
+> - 数据层改为 `SessionEventStream` 日志流（`@deepseek-ai/dsh-api-session-controller/client`，通过 `dsh.client.external` 从动态模块行解析）：子会话事件实时流式推送，取代逐次尾部轮询；
+> - 面板逻辑保持与上游一致（`useChat` 命令观察、工具行渲染契约）；
+> - 适配决定见 [docs/adr/0001-sidechat-context-model.md](docs/adr/0001-sidechat-context-model.md)（fork 继承语义而非手动附件）。
+> 跟随上游：`git fetch upstream && git rebase upstream/compat/dsh-v0.1.2-alpha.2`。
+
 | 命令 | 用途 |
 |---|---|
 | `/btw <问题>` | 发起一次性侧问，适合快速确认信息 |

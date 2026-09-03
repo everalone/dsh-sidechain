@@ -5,9 +5,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CommandNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import { SessionEventStream } from './browser-modules.stub'
 import { apply } from '../src/client/index'
 import { observeCreatedChildren, resolveChildSessionId } from '../src/client/SideCommandCard'
 import { resetSidechainPanel } from '../src/client/panel-state'
+import { resetSidechainJournalCache } from '../src/client/sidechain-view'
 
 const CHILD_ID = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914'
 
@@ -121,6 +123,8 @@ describe('client apply wiring', () => {
 
   beforeEach(() => {
     resetSidechainPanel()
+    resetSidechainJournalCache()
+    SessionEventStream.reset()
   })
 
   function fakeCtx() {
@@ -128,13 +132,11 @@ describe('client apply wiring', () => {
     const refreshSubagents = vi.fn(() => Promise.resolve())
     const setSubagentCatalogOpen = vi.fn()
     const registerLocale = vi.fn()
-    const follow = vi.fn(async function* () {
-      yield { type: 'snapshot' as const, cursor: 0, records: [], hasMore: false, header: {}, projections: {} }
-    })
-    const page = vi.fn(() => Promise.resolve({ ok: true as const, value: { records: [], hasMore: false } }))
     const prompt = vi.fn(() => Promise.resolve({ ok: true as const, value: { messageId: 'm' } }))
     const remote = {
-      session: { follow, page, attachment: vi.fn(), openWorkspacePath: vi.fn() },
+      $stream: vi.fn(),
+      commands: {},
+      session: { attachment: vi.fn(), openWorkspacePath: vi.fn() },
       subagents: { prompt },
     }
     const ctx = {
@@ -154,7 +156,7 @@ describe('client apply wiring', () => {
         },
       },
     }
-    return { ctx, registered, follow, page, prompt, refreshSubagents, setSubagentCatalogOpen }
+    return { ctx, registered, prompt, refreshSubagents, setSubagentCatalogOpen }
   }
 
   it('registers keyed cards, an always-mounted panel host, and the header toggle', () => {
@@ -169,24 +171,18 @@ describe('client apply wiring', () => {
       ])
   })
 
-  it('panel inject wires the transcript RPC and catalog methods', async () => {
-    const { ctx, registered, follow, prompt, refreshSubagents, setSubagentCatalogOpen } = fakeCtx()
+  it('panel inject wires the journal transcript layer and catalog methods', async () => {
+    const { ctx, registered, prompt, refreshSubagents, setSubagentCatalogOpen } = fakeCtx()
+    // The journal opens with one empty window: rows are empty, activity is null.
+    SessionEventStream.nextOpen.push({ page: { records: [], hasMore: false }, entries: [], hasMore: false })
     apply(ctx as never)
     const entry = registered.find(item => item.options.id === 'sidechain-panel-host')!
     const injected = entry.options.inject!('parent-1')
     const address = { parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' }
     const transcript = await injected.readTranscript!(address)
-    expect(follow).toHaveBeenCalledWith({
-      address: { kind: 'subagent', parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' },
-      maxMessages: 8,
-    })
     expect(transcript).toEqual({ rows: [], produced: [] })
-    // The activity line reads a lighter tail page; an empty log yields null.
+    // The activity line reads the journal tail; an empty log yields null.
     const activityLine = await injected.readActivity!(address)
-    expect(follow).toHaveBeenCalledWith({
-      address: { kind: 'subagent', parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' },
-      maxMessages: 6,
-    })
     expect(activityLine).toBeNull()
     const accepted = await injected.sendPrompt!(address, '继续')
     expect(prompt).toHaveBeenCalledWith(expect.objectContaining({

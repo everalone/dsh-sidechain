@@ -1,47 +1,46 @@
 /**
- * Embedded side-conversation transcript model (browser half).
+ * Embedded side-conversation transcript model (browser half), 0.1.2-alpha.2 port.
  *
- * The panel renders a child's conversation from alpha Session Remote history,
- * which reads the durable log without activating the child or changing the current session.
+ * The panel renders a child's conversation from the Session journal stream
+ * (`SessionEventStream` from `@deepseek-ai/dsh-api-session-controller/client`),
+ * bound to the child's direct-subagent address. The stream reads the durable
+ * log WITHOUT activating the child or changing the staged (main) session —
+ * the same non-activating transport the runtime's catalog uses.
  *
  * A sidechain child's log starts with the ENTIRE inherited parent history as
  * its fork seed (reference context). The mapping therefore cuts everything
  * before the first "Side conversation boundary" prompt and its preceding
- * seed marker, so continuation-turn seed markers do not hide older turns.
+ * `session/end-seed` marker. Packed history rows (`chunkrow/*`) expand to
+ * their member events before mapping.
  *
- * Live streaming: `assistant/message` events only land when a step completes,
- * but `assistant/chunk` events stream token-level text and reasoning deltas.
- * The mapping accumulates both per block and supersedes them with the
- * assembled message once it lands. Tail polls merge into a per-child event
- * cache, so old rounds remain visible without re-reading the inherited seed.
+ * Live streaming: `assistant/chunk` events stream token-level text and
+ * reasoning deltas. The mapping accumulates both per block and supersedes
+ * them with the assembled `assistant/message` once it lands. The journal
+ * keeps every accepted event keyed by seq, so earlier rounds remain visible
+ * without re-reading the inherited seed.
  */
 
-import type { SessionRemote } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SessionAddress, SessionFollowFrame, SessionHistoryRecord } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { ClientRemote } from '@deepseek-ai/dsh-api-remotes/client'
+import {
+  SessionEventStream,
+  type SessionEventLikeEntry,
+  type SessionJournalChange,
+} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionAddress } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
-import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session/chunk-rows'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress, SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent/client'
 import { lastActivity } from './sidechain-activity.ts'
 
 /**
- * Tail-page size for one transcript fetch (messages per page). Small on
+ * Tail-window size for one journal open (messages per window). Small on
  * purpose: a side child inherits the ENTIRE parent history as its fork seed,
  * and the seed is dense with chunk/reasoning events — a large window would
- * drag megabytes of inherited seed across the wire for every poll.
+ * drag megabytes of inherited seed across the wire.
  */
 export const TRANSCRIPT_PAGE_MESSAGES = 8
-/** Activity fetch: even smaller pages, fewer pages (only needs the tail). */
-export const ACTIVITY_PAGE_MESSAGES = 6
-export const ACTIVITY_PAGE_CAP = 4
-
-/** Detail attached to one tool row from alpha's raw Session events. */
-export interface ToolDetail {
-  arguments?: string | undefined
-  result?: readonly ContentBlock[] | undefined
-  meta?: unknown
-  error?: { name: string; code: string } | undefined
-}
+/** Activity reads reuse the journal; this many tail events feed the line. */
+export const ACTIVITY_TAIL_EVENTS = 24
 
 type ImageAttachmentRef = Extract<ContentBlock, { type: 'image' }>['attachment']
 
@@ -66,15 +65,89 @@ export type TranscriptRow =
   | { kind: 'error'; seq: number; text: string }
   | { kind: 'tool'; seq: number; name: string; failed: boolean; detail?: ToolDetail | undefined }
 
+/** Detail attached to one tool row: raw arguments plus the settled result's
+ *  content blocks (the panel renders them through {@link resultViewSummary}). */
+export interface ToolDetail {
+  /** Raw arguments JSON exactly as the model produced it. */
+  arguments?: string
+  /** The settled result block's content, absent while still running or empty. */
+  result?: readonly ContentBlock[] | undefined
+  error?: { name: string; code: string }
+}
+
+/** One-line summary of a settled tool result's content blocks. */
+export function resultViewSummary(content: readonly ContentBlock[]): string | undefined {
+  return content.length === 0 ? undefined : blockText(content)
+}
+
+/**
+ * Local projection of a logged non-user message source (the main chat derives
+ * the same facts inside its own bundle; the public client entry does not
+ * re-export that helper, so the panel keeps a faithful small copy).
+ */
+export interface ContextProvenanceView {
+  readonly role: 'inject' | 'recall'
+  readonly label: string | null
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null
+}
+
+function readString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' ? value : null
+}
+
+function collectLabels(record: Record<string, unknown>, key: string, member: string): string[] {
+  const value = record[key]
+  if (!Array.isArray(value)) return []
+  return value.flatMap(item => {
+    if (typeof item !== 'object' || item === null) return []
+    const label = (item as Record<string, unknown>)[member]
+    return typeof label === 'string' ? [label] : []
+  })
+}
+
+function joined(values: readonly string[]): string | null {
+  if (values.length === 0) return null
+  return [...new Set(values)].join(', ')
+}
+
+export function contextProvenance(source: unknown): ContextProvenanceView {
+  const record = asRecord(source)
+  const kind = record === null ? null : readString(record, 'kind')
+  if (record === null || kind === null) return { role: 'inject', label: null }
+  switch (kind) {
+    case 'session-reference': return {
+      role: 'recall',
+      label: joined(collectLabels(record, 'references', 'label')) ?? kind,
+    }
+    case 'agent-instructions': return {
+      role: 'inject',
+      label: joined(collectLabels(record, 'changes', 'path')) ?? kind,
+    }
+    case 'plugin': return {
+      role: 'inject',
+      label: readString(record, 'plugin') ?? kind,
+    }
+    case 'skill-invocation': return {
+      role: 'inject',
+      label: readString(record, 'name') ?? kind,
+    }
+    default: return { role: 'inject', label: kind }
+  }
+}
+
 /** The fork boundary prompt's first line (marker for the side boundary message). */
 const BOUNDARY_PREFIX = 'Side conversation boundary'
 
 /**
  * Strip the internal side-conversation boundary envelope off an opening user
  * message, returning just the user's own question. The boundary message is
- * built by {@link sidePrompt} as: boundary prompt + mode line + question.
- * When the message is not a boundary (no `Mode:` line present) it is treated
- * as a pure internal envelope and dropped (`null`).
+ * built by the host side as: boundary prompt + mode line + question. When the
+ * message is not a boundary (no `Mode:` line present) it is treated as a pure
+ * internal envelope and dropped (`null`).
  */
 function stripSideBoundary(text: string): string | null {
   if (!text.startsWith(BOUNDARY_PREFIX)) return text
@@ -127,40 +200,25 @@ function isSideBoundaryEvent(event: SessionEvent): boolean {
     && event.data.content.some(block => block.type === 'text' && block.text.startsWith(BOUNDARY_PREFIX))
 }
 
-/** Seed marker immediately before the child's first boundary prompt, or the
- * latest marker for legacy logs without a boundary. */
-function transcriptSeedEnd(events: readonly SessionEvent[]): number {
-  const boundary = events.findIndex(isSideBoundaryEvent)
-  if (boundary >= 0) {
-    for (let i = boundary - 1; i >= 0; i--) {
-      if (events[i]?.type === 'session/end-seed') return i
-    }
-    return -1
-  }
-  return lastSeedEnd(events)
-}
-
 /**
- * Map a session log's history rows onto compact transcript rows: the
- * inherited fork seed is cut at the first boundary's preceding
- * `session/end-seed`, the boundary prompt is dropped, `assistant/chunk` text deltas accumulate into a
- * streaming row per step (superseded by the assembled `assistant/message`),
- * and tool invocations render one expandable line each — raw arguments and
- * paired result content ride the row as detail; a failing `tool/result` marks it.
- * @param entries - expanded alpha history events in seq order.
+ * Map a session log's expanded events onto compact transcript rows: the
+ * inherited fork seed is cut at the boundary's preceding
+ * `session/end-seed`, the boundary prompt is dropped, `assistant/chunk` text
+ * deltas accumulate into a streaming row per step (superseded by the
+ * assembled `assistant/message`), and tool invocations render one expandable
+ * line each — raw arguments and the paired result's text (matched by the
+ * result's `toolCallId`) ride the row as detail; a failing `tool/result`
+ * marks it.
+ * @param events - expanded session events in seq order (already seed-cut).
  * @returns display rows in log order.
  */
-export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
-  const events = entries.map(entry => entry.event)
-  const seedEnd = transcriptSeedEnd(events)
+export function transcriptRows(events: readonly SessionEvent[]): TranscriptRow[] {
   const rows: TranscriptRow[] = []
   /** (turn, step, block, kind) key → index of its accumulating stream row. */
   const streamRows = new Map<string, number>()
   /** tool callId → index of its tool row in `rows` (result pairing). */
   const callRows = new Map<string, number>()
-  for (let i = 0; i < events.length; i++) {
-    if (i <= seedEnd) continue
-    const event = events[i] as SessionEvent
+  for (const event of events) {
     switch (event.type) {
       case 'user/message': {
         const refs = imageRefs(event.data.content)
@@ -176,10 +234,11 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         if (sourceKind === undefined || sourceKind === 'user') {
           rows.push({ kind: 'user', seq: event.seq, text: displayText, ...images })
         } else {
+          const provenance = contextProvenance(source)
           rows.push({
             kind: 'context', seq: event.seq, text: displayText,
-            source: typeof sourceKind === 'string' ? sourceKind : null,
-            recall: sourceKind === 'recall' || sourceKind === 'context-recall',
+            source: provenance.label,
+            recall: provenance.role === 'recall',
             ...images,
           })
         }
@@ -260,6 +319,12 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         // A result is failed on the explicit event error OR the block's own
         // isError flag (tools report hard failures either way).
         const failed = error !== undefined || resultBlock?.isError === true
+        const detail: ToolDetail = {
+          ...(resultBlock?.content !== undefined && resultBlock.content.length > 0
+            ? { result: resultBlock.content }
+            : {}),
+          ...(error === undefined ? {} : { error }),
+        }
         if (index !== undefined) {
           const row = rows[index]
           if (row !== undefined && row.kind === 'tool') {
@@ -268,9 +333,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
               failed,
               detail: {
                 ...row.detail,
-                ...(resultBlock?.content.length === 0 ? {} : { result: resultBlock?.content }),
-                ...(data.meta === undefined ? {} : { meta: data.meta }),
-                ...(error === undefined ? {} : { error }),
+                ...detail,
               },
             }
           }
@@ -297,32 +360,35 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   return rows
 }
 
-/** One expanded alpha history event. */
-export interface TranscriptEntry {
-  event: SessionEvent
+/** Tool names that produce files, with an args extractor for the path. */
+const PRODUCING_TOOLS: Readonly<Record<string, (args: Record<string, unknown>) => string | undefined>> = {
+  write: filePathArg,
+  edit: filePathArg,
+  str_replace_editor: (args) =>
+    args.command === 'insert' ? filePathArg(args) : undefined,
+}
+
+function filePathArg(args: Record<string, unknown>): string | undefined {
+  if (typeof args.file_path === 'string') return args.file_path
+  if (typeof args.path === 'string') return args.path
+  return undefined
 }
 
 /**
  * Files the child's tool calls report having created or changed, by render
- * intent rather than tool name — the same policy as the main chat's
- * ui-deliverables: a diff card, or a generic card whose `kind` is `edit`
- * (the shape `str_replace_editor`'s insert presents). Reads, deletes, and
- * plain terminal runs produce nothing. Paths keep first-seen order and
- * appear once.
- * @param entries - expanded alpha history events.
+ * intent rather than tool name — write/edit calls and `str_replace_editor`
+ * inserts. The alpha.2 port derives paths from raw call arguments (the rc.2
+ * host-computed render views are gone); reads, deletes, and plain terminal
+ * runs produce nothing. Paths keep first-seen order and appear once.
+ * @param events - seed-cut events in seq order.
  * @returns produced file paths.
  */
-export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
-  // The same seed cut transcriptRows applies: a fresh child's tail window
-  // contains the inherited parent history, whose write/edit calls would
-  // otherwise leak the PARENT's produced files into this child's vocabulary.
-  const seedEnd = transcriptSeedEnd(entries.map(entry => entry.event))
+export function producedPaths(events: readonly SessionEvent[]): string[] {
   // Calls whose result failed produced nothing to open (ui-deliverables
   // policy: failed calls do not count).
   const failedCallIds = new Set<string>()
-  for (let i = seedEnd + 1; i < entries.length; i++) {
-    const event = entries[i]?.event
-    if (event === undefined || event.type !== 'tool/result') continue
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
     const block = event.data.message.content[0]
     const callId = block?.toolCallId
     if (callId === undefined) continue
@@ -330,31 +396,25 @@ export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
   }
   const paths: string[] = []
   const seen = new Set<string>()
-  for (let i = seedEnd + 1; i < entries.length; i++) {
-    const entry = entries[i] as TranscriptEntry
-    if (entry.event.type !== 'tool/call' || failedCallIds.has(entry.event.data.callId)) continue
-    // Alpha keeps tool presentation in the client UI; recover common write
-    // and edit path fields so file mentions still work in this custom view.
-    if (!/(write|edit|replace|patch|create)/i.test(entry.event.data.name)) continue
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue
+    if (failedCallIds.has(event.data.callId)) continue
+    const extractor = PRODUCING_TOOLS[event.data.name]
+    if (extractor === undefined) continue
+    let args: Record<string, unknown>
     try {
-      const args = JSON.parse(entry.event.data.arguments) as Record<string, unknown>
-      for (const key of ['file_path', 'filePath', 'path']) {
-        const path = args[key]
-        if (typeof path === 'string' && !seen.has(path)) {
-          seen.add(path)
-          paths.push(path)
-        }
-      }
+      const parsed: unknown = JSON.parse(event.data.arguments)
+      if (parsed === null || typeof parsed !== 'object') continue
+      args = parsed as Record<string, unknown>
     } catch {
-      // Invalid tool arguments cannot name a file.
+      continue
     }
+    const path = extractor(args)
+    if (path === undefined || seen.has(path)) continue
+    seen.add(path)
+    paths.push(path)
   }
   return paths
-}
-
-/** One-line summary of alpha tool-result content. */
-export function resultViewSummary(content: readonly ContentBlock[]): string | undefined {
-  return content.length === 0 ? undefined : blockText(content)
 }
 
 /**
@@ -373,84 +433,265 @@ export function mergeProduced(
   return [...previous, ...next.filter(path => !seen.has(path))]
 }
 
+// ---- Child journals (live, non-activating transcript sources) ----
+
+/** Remotes face the journal layer consumes (structurally the Session Remotes). */
+export interface JournalRemotes {
+  readonly $stream: ClientRemote['$stream']
+  readonly commands: ClientRemote['commands']
+  readonly session: ClientRemote['session']
+  readonly subagents: ClientRemote['subagents']
+}
+
+/** One child's live journal: stream, accumulated events, seed-boundary state. */
+export interface ChildJournal {
+  address: SessionAddress
+  stream: SessionEventStream
+  /** Expanded events by seq, accumulated across pages and live appends. */
+  entries: Map<number, SessionEvent>
+  /** Marker seq cutting the fork seed; entries at/below it are seed. */
+  seedSeq: number | undefined
+  /** Whether the seed boundary has been located (no further back-paging). */
+  boundaryFound: boolean
+  /** The tail window's lowest seq — the exclusive bound for the next older page. */
+  firstSeq: number | undefined
+  /** Whether older pages remain behind the current window. */
+  hasMore: boolean
+  /** Settled when the first window is published; false on terminal failure. */
+  opened: Promise<boolean>
+  failed: boolean
+}
+
 /**
- * Fetch a child's transcript.
- *
- * Reads through alpha's `session.follow`/`session.page` Remote methods without
- * activating the child or changing the current session.
- *
- * The child's log starts with the entire inherited parent history (fork
- * seed), which can be tens of thousands of chunk events. A single large tail
- * window would ship the inherited seed on every poll, so the reader pages
- * backwards in small windows until a window contains the seed boundary,
- * then cuts there. Later reads fetch one tail page and merge those events into
- * the cached child transcript, retaining earlier rounds.
- * @param sessions - alpha's generated Session Remote surface.
- * @param address - durable parent/child address (only the child id is used).
- * @returns display rows plus the produced-file vocabulary, or null on
- *   transport/business failure.
+ * Expand one packed history row back to its member `assistant/chunk` events.
+ * Text and reasoning runs expand member-by-member (token boundaries are
+ * data); tool-call runs are skipped — the panel renders the assembled
+ * `tool/call` / `tool/result` pair, never the argument deltas.
+ * @param entry - one journal entry (raw event or packed run).
+ * @returns the expanded member events, in seq order.
  */
-export async function fetchTranscript(
-  sessions: SessionRemote,
-  address: SubagentAddress,
-): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
-  const entries = await fetchSeedCutEntries(
-    sessions, address, TRANSCRIPT_PAGE_MESSAGES,
-  )
-  if (entries === null) return null
-  const previous = transcriptEntryCache.get(address.childSessionId) ?? []
-  const bySeq = new Map(previous.map(entry => [entry.event.seq, entry]))
-  for (const entry of entries) bySeq.set(entry.event.seq, entry)
-  const transcript = [...bySeq.values()].sort((a, b) => a.event.seq - b.event.seq)
-  transcriptEntryCache.set(address.childSessionId, transcript)
-  const rows = await hydrateTranscriptImages(sessions, address.childSessionId, transcriptRows(transcript))
+export function expandEntry(entry: SessionEventLikeEntry): SessionEvent[] {
+  if (entry.type === 'event') return [entry.event]
+  const row = entry.event
+  if (row.type === 'chunkrow/text-chunks' || row.type === 'chunkrow/reasoning-chunks') {
+    const chunkType = row.type === 'chunkrow/text-chunks' ? 'text-delta' : 'reasoning-delta'
+    const { turn, step, index, dt, texts } = row.data
+    const events: SessionEvent[] = []
+    let time = row.time
+    for (let k = 0; k < texts.length; k++) {
+      if (k > 0) time += dt[k - 1] ?? 0
+      events.push({
+        type: 'assistant/chunk',
+        seq: row.seq + k,
+        time,
+        data: { turn, step, chunk: { type: chunkType, index, text: texts[k] ?? '' } },
+      } as SessionEvent)
+    }
+    return events
+  }
+  return []
+}
+
+/**
+ * Fold one published journal page into the child state: expand + store every
+ * entry, track the window's leading seq and `hasMore`, and locate the seed
+ * boundary when it appears in this page.
+ * @param journal - the child's accumulated journal state.
+ * @param entries - one page's entries in seq order.
+ * @param hasMore - whether older pages remain behind this page.
+ */
+export function foldJournalPage(
+  journal: Pick<ChildJournal, 'entries' | 'seedSeq' | 'boundaryFound' | 'firstSeq' | 'hasMore'>,
+  entries: readonly SessionEventLikeEntry[],
+  hasMore: boolean,
+): void {
+  journal.hasMore = hasMore
+  const pageEvents: SessionEvent[] = []
+  let first: number | undefined
+  for (const entry of entries) {
+    for (const event of expandEntry(entry)) {
+      journal.entries.set(event.seq, event)
+      pageEvents.push(event)
+      first = first === undefined ? event.seq : Math.min(first, event.seq)
+    }
+  }
+  if (first !== undefined) journal.firstSeq = first
+  if (!journal.boundaryFound) detectBoundary(journal, pageEvents)
+}
+
+/**
+ * Locate the seed boundary inside one page: the `session/end-seed` marker
+ * immediately before the first boundary prompt. Without a boundary prompt,
+ * a page that ends the log (no older pages) cuts at its latest seed marker
+ * (legacy fork children without the side envelope).
+ */
+function detectBoundary(
+  journal: Pick<ChildJournal, 'seedSeq' | 'boundaryFound' | 'hasMore'>,
+  pageEvents: readonly SessionEvent[],
+): void {
+  const boundary = pageEvents.findIndex(isSideBoundaryEvent)
+  if (boundary >= 0) {
+    for (let i = boundary - 1; i >= 0; i--) {
+      if (pageEvents[i]?.type !== 'session/end-seed') continue
+      journal.seedSeq = pageEvents[i]!.seq
+      journal.boundaryFound = true
+      return
+    }
+    // The marker lies in an older window; the walk continues paging back.
+    return
+  }
+  if (!journal.hasMore) {
+    const seedEnd = lastSeedEnd(pageEvents)
+    if (seedEnd >= 0) {
+      journal.seedSeq = pageEvents[seedEnd]!.seq
+      journal.boundaryFound = true
+    }
+  }
+}
+
+/** Accumulated journal entries above the seed cut, in seq order. */
+export function displayEntries(journal: Pick<ChildJournal, 'entries' | 'seedSeq' | 'boundaryFound'>): SessionEvent[] {
+  const events = [...journal.entries.values()].sort((a, b) => a.seq - b.seq)
+  if (journal.boundaryFound && journal.seedSeq !== undefined) {
+    const cut = journal.seedSeq
+    return events.filter(event => event.seq > cut)
+  }
+  const seedEnd = lastSeedEnd(events)
+  if (seedEnd >= 0) return events.slice(seedEnd + 1)
+  return events
+}
+
+const journals = new Map<string, ChildJournal>()
+const imageUrlCache = new Map<string, string | null>()
+
+function childAddress(address: SubagentAddress): SessionAddress {
   return {
-    rows,
-    produced: producedPaths(transcript),
+    kind: 'subagent',
+    parentSessionId: address.parentSessionId,
+    childSessionId: address.childSessionId,
+    mode: address.mode,
   }
 }
 
 /**
- * Fetch one running child's live activity line (latest assistant text or
- * last tool call) from a light seed-cut tail page — the list-row preview
- * poll, kept much cheaper than the full transcript page (no produced
- * vocabulary, fewer pages).
- * @param sessions - the api client's sessions surface.
- * @param address - durable parent/child address (only the child id is used).
- * @returns the activity line, or null on transport/business failure or an
- *   empty tail.
+ * Resolve (or create) the live journal for one child. The stream publishes
+ * `replace`/`prepend` window changes and live appends into the child state;
+ * the opening promise settles after the first window is published.
  */
-export async function fetchActivity(
-  sessions: SessionRemote,
+export function ensureChildJournal(
+  remotes: JournalRemotes,
   address: SubagentAddress,
-): Promise<string | null> {
-  const entries = await fetchSeedCutEntries(
-    sessions, address, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
-  )
-  if (entries === null) return null
-  return lastActivity(transcriptRows(entries)) ?? null
+  pageMessages: number,
+): ChildJournal {
+  const existing = journals.get(address.childSessionId)
+  if (existing !== undefined) return existing
+  const journal: ChildJournal = {
+    address: childAddress(address),
+    stream: undefined as unknown as SessionEventStream,
+    entries: new Map(),
+    seedSeq: undefined,
+    boundaryFound: false,
+    firstSeq: undefined,
+    hasMore: false,
+    failed: false,
+    opened: Promise.resolve(true),
+  }
+  journal.stream = new SessionEventStream(remotes, journal.address, {
+    publish: (change: SessionJournalChange): void => {
+      if (change.type === 'append') {
+        for (const event of expandEntry(change.entry)) journal.entries.set(event.seq, event)
+        return
+      }
+      foldJournalPage(journal, change.entries, change.hasMore)
+    },
+    failed: () => { journal.failed = true },
+  })
+  journal.opened = journal.stream.open({ maxMessages: pageMessages })
+    .then(() => !journal.failed)
+    .catch(() => {
+      journal.failed = true
+      return false
+    })
+  journals.set(address.childSessionId, journal)
+  return journal
 }
 
 /**
- * Per-child seed-boundary cache: the seq of the marker before the child's
- * first boundary. Once the first walk locates it, every later read needs at
- * most ONE page and the dense inherited seed is never re-downloaded.
+ * Page a child's journal backwards until the seed boundary is located (or
+ * the cap is reached for lightweight callers). Later pages ride the stream's
+ * `prepend`; the boundary is cached on the journal, so subsequent reads need
+ * no further paging.
  */
-const seedBoundaryCache = new Map<string, number>()
-/** Child-owned history accumulated from cheap tail polls. */
-const transcriptEntryCache = new Map<string, readonly TranscriptEntry[]>()
-const imageUrlCache = new Map<string, string | null>()
+async function walkToBoundary(journal: ChildJournal, pageMessages: number, pageCap?: number): Promise<void> {
+  let pages = 0
+  while (!journal.boundaryFound && journal.hasMore && !journal.failed) {
+    if (pageCap !== undefined && pages >= pageCap) return
+    if (journal.firstSeq === undefined) return
+    pages += 1
+    const beforeSeq = journal.firstSeq
+    try {
+      await journal.stream.prepend({ maxMessages: pageMessages, beforeSeq })
+    } catch {
+      journal.failed = true
+      return
+    }
+  }
+}
 
-/** Test seam: drop cached seed boundaries and accumulated transcripts. */
-export function resetSeedBoundaryCache(): void {
-  seedBoundaryCache.clear()
-  transcriptEntryCache.clear()
+/**
+ * Read a child's accumulated, seed-cut transcript.
+ * @param remotes - the client Remote namespaces.
+ * @param address - durable parent/child address.
+ * @returns display rows plus the produced-file vocabulary, or null on
+ *   transport/business failure.
+ */
+export async function readChildTranscript(
+  remotes: JournalRemotes,
+  address: SubagentAddress,
+): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
+  const journal = ensureChildJournal(remotes, address, TRANSCRIPT_PAGE_MESSAGES)
+  const opened = await journal.opened
+  if (!opened || journal.failed) return null
+  await walkToBoundary(journal, TRANSCRIPT_PAGE_MESSAGES)
+  if (journal.failed) return null
+  const entries = displayEntries(journal)
+  const rows = await hydrateTranscriptImages(remotes, address.childSessionId, transcriptRows(entries))
+  return {
+    rows,
+    produced: producedPaths(entries),
+  }
+}
+
+/**
+ * Read one running child's live activity line (latest assistant text or last
+ * tool call) from the journal's accumulated tail — cheap because the journal
+ * already streams the live events; no extra pages are pulled.
+ * @param remotes - the client Remote namespaces.
+ * @param address - durable parent/child address.
+ * @returns the activity line, or null on transport/business failure or an
+ *   empty tail.
+ */
+export async function readChildActivity(
+  remotes: JournalRemotes,
+  address: SubagentAddress,
+): Promise<string | null> {
+  const journal = ensureChildJournal(remotes, address, TRANSCRIPT_PAGE_MESSAGES)
+  const opened = await journal.opened
+  if (!opened || journal.failed) return null
+  const tail = [...journal.entries.values()].sort((a, b) => a.seq - b.seq).slice(-ACTIVITY_TAIL_EVENTS)
+  return lastActivity(transcriptRows(tail)) ?? null
+}
+
+/** Test seam: dispose live journals and drop the accumulated caches. */
+export function resetSidechainJournalCache(): void {
+  for (const journal of journals.values()) void journal.stream.dispose().catch(() => {})
+  journals.clear()
   imageUrlCache.clear()
 }
 
 async function hydrateTranscriptImages(
-  sessions: SessionRemote,
-  childSessionId: SubagentAddress['childSessionId'],
+  remotes: JournalRemotes,
+  childSessionId: SessionId,
   rows: readonly TranscriptRow[],
 ): Promise<TranscriptRow[]> {
   const refs = new Map<string, ImageAttachmentRef>()
@@ -464,7 +705,7 @@ async function hydrateTranscriptImages(
   await Promise.all([...refs].map(async ([id, ref]) => {
     if (imageUrlCache.has(id)) return
     try {
-      const response = await sessions.attachment({
+      const response = await remotes.session.attachment({
         sessionId: childSessionId,
         attachmentId: ref.attachmentId,
       })
@@ -492,155 +733,28 @@ async function hydrateTranscriptImages(
 }
 
 /**
- * Page a child's log backwards from the tail in small windows until a window
- * contains the first boundary prompt, then return everything after the seed
- * marker before that prompt — the child's own conversation only.
- *
- * The host pages strictly backward (`beforeSeq` is an exclusive upper bound),
- * so there is no "start after the boundary" fetch: the first read walks back
- * until a window contains the boundary. Later reads fetch one tail window and
- * cut with the cached seed marker. Overlap between pages is deduped by
- * sequence, so an inclusive `beforeSeq` contract on the host is harmless.
- * @param sessions - the api client's sessions surface.
- * @param childSessionId - the child whose own conversation to read.
- * @param pageMessages - messages per backward page.
- * @param pageCap - optional backward-page cap for lightweight callers. The
- *   transcript read omits it and continues until the seed boundary.
- * @returns the seed-cut entries, or null on transport/business failure.
- */
-async function fetchSeedCutEntries(
-  sessions: SessionRemote,
-  childAddress: SubagentAddress,
-  pageMessages: number,
-  pageCap?: number,
-): Promise<readonly TranscriptEntry[] | null> {
-  const childSessionId = childAddress.childSessionId
-  const cachedBoundary = seedBoundaryCache.get(childSessionId)
-  const collected: TranscriptEntry[] = []
-  let beforeSeq: number | undefined
-  let boundarySeq = cachedBoundary
-  const address: SessionAddress = {
-    kind: 'subagent',
-    parentSessionId: childAddress.parentSessionId,
-    childSessionId,
-    mode: childAddress.mode,
-  }
-  let throughSeq: number | undefined
-  try {
-    for (let page = 0; page < (pageCap ?? Number.POSITIVE_INFINITY); page++) {
-      let records: readonly SessionHistoryRecord[]
-      let hasMore: boolean
-      if (throughSeq === undefined) {
-        const iterator = sessions.follow({ address, maxMessages: pageMessages })[Symbol.asyncIterator]()
-        const first = await iterator.next()
-        await iterator.return?.()
-        if (first.done || first.value.type !== 'snapshot') return null
-        const snapshot = first.value as Extract<SessionFollowFrame, { type: 'snapshot' }>
-        throughSeq = snapshot.cursor
-        records = snapshot.records
-        hasMore = snapshot.hasMore
-      } else {
-        const response = await sessions.page({
-          address,
-          throughSeq,
-          maxMessages: pageMessages,
-          ...(beforeSeq === undefined ? {} : { beforeSeq }),
-        })
-        if (!response.ok) return null
-        records = response.value.records
-        hasMore = response.value.hasMore
-      }
-      const events = expandHistoryRecords(records)
-      if (events.length === 0) break
-      const olderThan = collected.length > 0 ? collected[0]!.event.seq : undefined
-      const fresh = olderThan === undefined
-        ? events
-        : events.filter(entry => entry.event.seq < olderThan)
-      if (boundarySeq !== undefined) {
-        // Cached boundary + a window without the marker: the window is
-        // entirely the child's own content — the seq filter is a safe no-op.
-        const boundary = boundarySeq
-        collected.unshift(...fresh.filter(entry => entry.event.seq > boundary))
-        break
-      }
-      const boundaryIndex = fresh.findIndex(entry => isSideBoundaryEvent(entry.event))
-      if (boundaryIndex >= 0) {
-        for (let i = boundaryIndex - 1; i >= 0; i--) {
-          if (fresh[i]?.event.type !== 'session/end-seed') continue
-          boundarySeq = fresh[i]!.event.seq
-          seedBoundaryCache.set(childSessionId, boundarySeq)
-          break
-        }
-        collected.unshift(...fresh)
-        break
-      }
-      const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
-      if (seedEnd >= 0 && hasMore === false) {
-        // Legacy/no-boundary logs have no stronger ownership marker.
-        boundarySeq = fresh[seedEnd]!.event.seq
-        seedBoundaryCache.set(childSessionId, boundarySeq)
-        collected.unshift(...fresh.slice(seedEnd + 1))
-        break
-      }
-      collected.unshift(...fresh)
-      if (!hasMore) break
-      if (fresh.length === 0) break
-      beforeSeq = fresh[0]!.event.seq
-    }
-  } catch {
-    return null
-  }
-  return collected
-}
-
-/** Expand alpha's packed history rows at the Remote boundary. */
-function expandHistoryRecords(records: readonly SessionHistoryRecord[]): TranscriptEntry[] {
-  const entries: TranscriptEntry[] = []
-  for (const record of records) {
-    if (record.type === 'event') {
-      entries.push({ event: record.event as unknown as SessionEvent })
-      continue
-    }
-    const packed = record.event
-    const type = packed.type.replace('chunkrow/', '')
-    const decoded = decodeStorageRecord({
-      type,
-      seq0: packed.seq,
-      time0: packed.time,
-      data: packed.data,
-    })
-    entries.push(...decoded.map(event => ({ event })))
-  }
-  return entries
-}
-
-/**
  * Deliver one human message to a continuable child through its exact
  * direct-parent address (the same non-activating transport the runtime's
  * catalog navigation uses).
- * @param subagents - the api client's subagents surface.
+ * @param subagents - the generated subagents Remote namespace.
  * @param address - continuable parent/child address.
  * @param text - the message body (one text block).
  * @returns whether the prompt was accepted.
  */
 export async function sendPrompt(
-  subagents: { prompt: (request: {
-    requestId: SubagentPromptRequestId
-    parentSessionId: SubagentAddress['parentSessionId']
-    childSessionId: SubagentAddress['childSessionId']
-    mode: 'continuable'
-    content: ContentBlock[]
-  }) => Promise<{ ok: boolean }> },
+  subagents: JournalRemotes['subagents'],
   address: Extract<SubagentAddress, { mode: 'continuable' }>,
   text: string,
 ): Promise<boolean> {
   try {
     const response = await subagents.prompt({
       requestId: crypto.randomUUID() as SubagentPromptRequestId,
-      ...address,
+      parentSessionId: address.parentSessionId,
+      childSessionId: address.childSessionId,
+      mode: 'continuable',
       content: [{ type: 'text', text }] satisfies readonly ContentBlock[],
     })
-    return response.ok === true
+    return response.ok
   } catch {
     return false
   }

@@ -1,407 +1,380 @@
 /**
- * Unit tests for the embedded side-conversation transcript model: event →
- * row mapping, tool call/result pairing, and the history/prompt RPC helpers.
+ * Unit tests for the embedded side-conversation transcript model (alpha.2
+ * port): event → row mapping, tool call/result pairing, packed-row expansion,
+ * the journal page folding + seed-boundary cut, and the journal/prompt reads.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
-import {
-  blockText, fetchTranscript, mergeProduced, producedPaths, resetSeedBoundaryCache,
-  resultViewSummary, sendPrompt, transcriptRows,
-} from '../src/client/sidechain-view'
-import type { TranscriptEntry } from '../src/client/sidechain-view'
-
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import {
+  blockText, displayEntries, ensureChildJournal, expandEntry, foldJournalPage,
+  mergeProduced, producedPaths, readChildActivity, readChildTranscript,
+  resetSidechainJournalCache, resultViewSummary, sendPrompt, transcriptRows,
+  type ChildJournal, type JournalRemotes,
+} from '../src/client/sidechain-view'
+import { SessionEventStream } from './browser-modules.stub'
 
 const CHILD = '54c34e5e-1c29-4a6c-a2f7-4b19a3d92914' as SessionId
-const ADDRESS: SubagentAddress = { parentSessionId: 'parent-1' as SessionId, childSessionId: CHILD, mode: 'continuable' }
+const PARENT = 'parent-1' as SessionId
+const ADDRESS: SubagentAddress = { parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable' }
 
 function event(type: SessionEvent['type'], seq: number, data: Record<string, unknown>): SessionEvent {
   return { type, seq, time: 0, data } as SessionEvent
 }
 
-/** Wrap events into expanded history rows. */
-function ent(...events: SessionEvent[]): TranscriptEntry[] {
-  return events.map(event => ({ event }))
+/** Wire entry: one raw event record. */
+function ev(entry: SessionEvent): { type: 'event'; event: SessionEvent } {
+  return { type: 'event', event: entry }
 }
+
+/** Wire entry: one packed text-chunks row. */
+function chunks(
+  kind: 'text-chunks' | 'reasoning-chunks',
+  seq: number,
+  texts: string[],
+): { type: 'chunks'; event: Record<string, unknown> } {
+  return {
+    type: 'chunks',
+    event: {
+      type: `chunkrow/${kind}`,
+      seq,
+      time: 0,
+      data: { turn: 1, step: 1, index: 0, dt: texts.slice(1).map(() => 0), texts },
+    },
+  }
+}
+
+function textBlock(text: string): { type: 'text'; text: string } {
+  return { type: 'text', text }
+}
+
+const SEED_MSG = event('user/message', 1, { content: [textBlock('inherited seed question')] })
+const SEED_END = event('session/end-seed', 2, {})
+const BOUNDARY = event('user/message', 3, {
+  content: [textBlock('Side conversation boundary.\n\nEverything before this boundary is inherited history from the parent session.\n\nMode: this is a /side side conversation.\n\n真实问题')],
+})
+const USER_MSG = event('user/message', 4, { content: [textBlock('真实问题')] })
+
+function journalState(): ChildJournal {
+  return {
+    address: { kind: 'subagent', parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable' },
+    stream: undefined as unknown as ChildJournal['stream'],
+    entries: new Map(),
+    seedSeq: undefined,
+    boundaryFound: false,
+    firstSeq: undefined,
+    hasMore: false,
+    failed: false,
+    opened: Promise.resolve(true),
+  }
+}
+
+function fakeRemotes(): JournalRemotes {
+  return {
+    $stream: vi.fn(),
+    commands: {},
+    session: {
+      attachment: vi.fn(() => Promise.resolve({ ok: true, value: { attachment: {}, data: '' } })),
+    },
+    subagents: { prompt: vi.fn(() => Promise.resolve({ ok: true, value: {} })) },
+  } as unknown as JournalRemotes
+}
+
+beforeEach(() => {
+  SessionEventStream.reset()
+  resetSidechainJournalCache()
+})
+
+afterEach(() => {
+  resetSidechainJournalCache()
+  SessionEventStream.reset()
+})
 
 describe('blockText', () => {
   it('joins text blocks with blank lines and skips non-text blocks', () => {
-    expect(blockText([
-      { type: 'text', text: '第一行' },
-      { type: 'reasoning', text: '思考过程' },
-      { type: 'text', text: '第二行' },
-    ])).toBe('第一行\n\n第二行')
-  })
-
-  it('renders … for content without visible text', () => {
-    expect(blockText([{ type: 'reasoning', text: 'hidden' }])).toBe('…')
+    expect(blockText([textBlock('a'), textBlock('b')])).toBe('a\n\nb')
+    expect(blockText([{ type: 'reasoning', text: 'x' }, textBlock('c')])).toBe('c')
     expect(blockText([])).toBe('…')
   })
 })
 
 describe('transcriptRows', () => {
-  it('maps user prompts, assistant answers, and tool calls in order', () => {
-    const rows = transcriptRows(ent(
-      event('user/message', 1, { content: [{ type: 'text', text: '查一下' }] }),
-      event('tool/call', 2, { name: 'grep', arguments: '{}' }),
-      event('tool/result', 3, { message: { content: [] } }),
-      event('assistant/message', 4, { message: { content: [{ type: 'text', text: '结果如下' }] } }),
-    ))
-    expect(rows).toEqual([
-      { kind: 'user', seq: 1, text: '查一下' },
-      { kind: 'tool', seq: 2, name: 'grep', failed: false, detail: { arguments: '{}' } },
-      { kind: 'assistant', seq: 4, text: '结果如下' },
-    ])
-  })
-
-  it('pairs a failing tool/result onto its call row by toolCallId', () => {
-    const rows = transcriptRows(ent(
-      event('tool/call', 1, { name: 'grep', arguments: '{}', callId: 'c1' }),
-      event('tool/result', 2, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] },
-        error: { name: 'E', code: 'C' },
-      }),
-    ))
-    expect(rows).toEqual([{
-      kind: 'tool', seq: 1, name: 'grep', failed: true,
-      detail: { arguments: '{}', error: { name: 'E', code: 'C' } },
-    }])
-  })
-
-  it('marks a result failed on the block isError flag', () => {
-    const rows = transcriptRows(ent(
-      event('tool/call', 1, { name: 'edit', arguments: '{}', callId: 'c1' }),
-      event('tool/result', 2, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: true }] },
-      }),
-    ))
-    expect(rows[0]).toMatchObject({ kind: 'tool', failed: true })
-  })
-
-  it('keeps the error on orphan failed rows (expandable detail)', () => {
-    const rows = transcriptRows(ent(
-      event('tool/result', 1, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c9', content: [] }] },
-        error: { name: 'E', code: 'C' },
-      }),
-    ))
-    expect(rows).toEqual([{
-      kind: 'tool', seq: 1, name: 'tool', failed: true,
-      detail: { error: { name: 'E', code: 'C' } },
-    }])
-  })
-
-  it('attaches alpha tool-result content to the paired row', () => {
+  it('maps user and settled assistant messages', () => {
     const rows = transcriptRows([
-      {
-        event: event('tool/call', 1, { name: 'bash', arguments: '{}', callId: 'c1' }),
-      },
-      {
-        event: event('tool/result', 2, {
-          message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'src' }] }] },
-        }),
-      },
-    ])
-    expect(rows).toEqual([{
-      kind: 'tool', seq: 1, name: 'bash', failed: false,
-      detail: {
-        arguments: '{}',
-        result: [{ type: 'text', text: 'src' }],
-      },
-    }])
-  })
-
-  it('cuts the inherited fork seed at the last session/end-seed', () => {
-    const rows = transcriptRows(ent(
-      event('user/message', 1, { content: [{ type: 'text', text: '父会话的历史提问' }] }),
-      event('session/end-seed', 2, {}),
-      event('user/message', 3, { content: [{ type: 'text', text: '侧链提问' }] }),
-      event('assistant/message', 4, { message: { content: [{ type: 'text', text: '侧链回答' }] } }),
-    ))
-    expect(rows).toEqual([
-      { kind: 'user', seq: 3, text: '侧链提问' },
-      { kind: 'assistant', seq: 4, text: '侧链回答' },
-    ])
-  })
-
-  it('strips the boundary envelope and keeps the user question', () => {
-    const rows = transcriptRows(ent(
-      event('session/end-seed', 1, {}),
-      event('user/message', 2, {
-        content: [{ type: 'text', text: 'Side conversation boundary.\n\nEverything before this boundary is reference context only.\n\nMode: this is a /btw one-shot side question. Answer once.\n\n这个目录下哪个文件最大？' }],
+      USER_MSG,
+      event('assistant/message', 5, {
+        turn: 1, step: 1,
+        message: { role: 'assistant', content: [textBlock('回答')] },
       }),
-      event('assistant/message', 3, { message: { content: [{ type: 'text', text: '好的' }] } }),
-    ))
+    ])
     expect(rows).toEqual([
-      { kind: 'user', seq: 2, text: '这个目录下哪个文件最大？' },
-      { kind: 'assistant', seq: 3, text: '好的' },
+      { kind: 'user', seq: 4, text: '真实问题' },
+      { kind: 'assistant', seq: 5, text: '回答' },
     ])
   })
 
-  it('accumulates text-delta chunks into a streaming row and supersedes it with the assembled message', () => {
-    const stream = transcriptRows(ent(
-      event('session/end-seed', 1, {}),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
-      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
-    ))
-    expect(stream).toEqual([{ kind: 'assistant', seq: 2, text: '你好，世界' }])
-    const settled = transcriptRows(ent(
-      event('session/end-seed', 1, {}),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } }),
-      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '，世界' } }),
-      event('assistant/message', 4, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '你好，世界！' }] } }),
-    ))
-    expect(settled).toEqual([{ kind: 'assistant', seq: 4, text: '你好，世界！' }])
+  it('strips the side boundary envelope off its opening user message', () => {
+    const rows = transcriptRows([BOUNDARY])
+    expect(rows).toEqual([{ kind: 'user', seq: 3, text: '真实问题' }])
   })
 
-  it('ignores reasoning deltas and non-text chunks', () => {
-    const rows = transcriptRows(ent(
-      event('session/end-seed', 1, {}),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '思考中' } }),
-      event('assistant/chunk', 3, { turn: 1, step: 1, chunk: { type: 'tool-call-delta', index: 0, id: 'c1', argumentsDelta: '{}' } }),
-      event('assistant/chunk', 4, { turn: 1, step: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } }),
-      event('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '最终答案' }] } }),
-    ))
-    expect(rows).toEqual([{ kind: 'assistant', seq: 5, text: '最终答案' }])
-  })
-
-  it('skips log detail events (turn brackets, usage chunks, projections)', () => {
-    const rows = transcriptRows(ent(
-      event('turn/start', 1, { turn: 1 }),
-      event('assistant/chunk', 2, { turn: 1, step: 1, chunk: { type: 'usage', usage: {} } }),
-      event('turn/end', 3, { turn: 1, reason: 'stop' }),
-      event('session/end-seed', 4, {}),
-    ))
-    expect(rows).toEqual([])
-  })
-
-  it('surfaces a failed turn so one-shot errors are visible', () => {
-    const rows = transcriptRows(ent(
-      event('session/end-seed', 1, {}),
-      event('turn/end', 2, {
-        turn: 1,
-        reason: { kind: 'error', error: { message: 'model unavailable', code: 'MODEL_NOT_FOUND' } },
+  it('accumulates chunk deltas into streaming rows and supersedes them on settle', () => {
+    const rows = transcriptRows([
+      event('assistant/chunk', 5, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '你' } }),
+      event('assistant/chunk', 6, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '好' } }),
+      event('assistant/message', 7, {
+        turn: 1, step: 1,
+        message: { role: 'assistant', content: [textBlock('你好！')] },
       }),
-    ))
-    expect(rows).toEqual([{ kind: 'error', seq: 2, text: 'model unavailable' }])
+    ])
+    expect(rows).toEqual([{ kind: 'assistant', seq: 7, text: '你好！' }])
+  })
+
+  it('splits reasoning and text chunks into separate stream rows', () => {
+    const rows = transcriptRows([
+      event('assistant/chunk', 5, { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: '想' } }),
+      event('assistant/chunk', 6, { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: '答' } }),
+    ])
+    expect(rows).toEqual([
+      { kind: 'reasoning', seq: 5, text: '想' },
+      { kind: 'assistant', seq: 6, text: '答' },
+    ])
+  })
+
+  it('projects non-user context messages through the local provenance view', () => {
+    const rows = transcriptRows([
+      event('user/message', 5, {
+        content: [textBlock('上下文')],
+        source: { kind: 'agent-instructions', changes: [{ path: 'AGENTS.md' }] },
+      }),
+      event('user/message', 6, {
+        content: [textBlock('回忆')],
+        source: { kind: 'session-reference', references: [{ label: '旧会话' }] },
+      }),
+    ])
+    expect(rows).toEqual([
+      { kind: 'context', seq: 5, text: '上下文', source: 'AGENTS.md', recall: false },
+      { kind: 'context', seq: 6, text: '回忆', source: '旧会话', recall: true },
+    ])
+  })
+
+  it('pairs tool calls with their results and marks failures', () => {
+    const rows = transcriptRows([
+      event('tool/call', 5, { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{"path":"a.ts"}' }),
+      event('tool/result', 6, {
+        turn: 1, step: 1,
+        message: { role: 'tool', content: [{ toolCallId: 'c1', isError: false, content: [textBlock('文件内容')] }] },
+      }),
+      event('tool/call', 7, { turn: 1, step: 1, callId: 'c2', name: 'bash', arguments: '{"command":"boom"}' }),
+      event('tool/result', 8, {
+        turn: 1, step: 1,
+        message: { role: 'tool', content: [{ toolCallId: 'c2', isError: true }] },
+        error: { name: 'ToolError', code: 'EXEC_FAILED' },
+      }),
+    ])
+    expect(rows[0]).toEqual({
+      kind: 'tool', seq: 5, name: 'read', failed: false,
+      detail: { arguments: '{"path":"a.ts"}', result: [textBlock('文件内容')] },
+    })
+    expect(rows[1]).toMatchObject({
+      kind: 'tool', seq: 7, name: 'bash', failed: true,
+      detail: expect.objectContaining({ error: { name: 'ToolError', code: 'EXEC_FAILED' } }),
+    })
+  })
+
+  it('surfaces orphan failed results as standalone tool rows', () => {
+    const rows = transcriptRows([
+      event('tool/result', 8, {
+        turn: 1, step: 1,
+        message: { role: 'tool', content: [{ toolCallId: 'c9', isError: true }] },
+        error: { name: 'ToolError', code: 'LOST' },
+      }),
+    ])
+    expect(rows).toEqual([
+      { kind: 'tool', seq: 8, name: 'tool', failed: true, detail: { error: { name: 'ToolError', code: 'LOST' } } },
+    ])
+  })
+
+  it('maps turn/end error reasons into error rows', () => {
+    const rows = transcriptRows([
+      event('turn/end', 9, { turn: 1, reason: { kind: 'error', error: { message: '模型挂了', code: 'LLM' } } }),
+    ])
+    expect(rows).toEqual([{ kind: 'error', seq: 9, text: '模型挂了' }])
   })
 })
 
-describe('resultViewSummary', () => {
-  it('summarizes alpha tool-result content', () => {
-    expect(resultViewSummary([{ type: 'text', text: '结果' }])).toBe('结果')
-    expect(resultViewSummary([])).toBeUndefined()
+describe('expandEntry', () => {
+  it('passes raw events through', () => {
+    expect(expandEntry(ev(USER_MSG))).toEqual([USER_MSG])
+  })
+
+  it('expands packed text runs into per-member chunk events', () => {
+    const expanded = expandEntry(chunks('text-chunks', 10, ['a', 'b']) as never)
+    expect(expanded).toEqual([
+      { type: 'assistant/chunk', seq: 10, time: 0, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } },
+      { type: 'assistant/chunk', seq: 11, time: 0, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } },
+    ])
+  })
+
+  it('expands packed reasoning runs and drops tool-call runs', () => {
+    const reasoning = expandEntry(chunks('reasoning-chunks', 20, ['想']) as never)
+    expect(reasoning).toHaveLength(1)
+    expect(reasoning[0]).toMatchObject({
+      seq: 20, data: { chunk: { type: 'reasoning-delta', text: '想' } },
+    })
+    const toolRun = expandEntry({
+      type: 'chunks',
+      event: {
+        type: 'chunkrow/tool-call-chunks', seq: 30, time: 0,
+        data: { turn: 1, step: 1, index: 0, dt: [], id: 'c1', name: 'bash', args: ['ec'] },
+      },
+    } as never)
+    expect(toolRun).toEqual([])
+  })
+})
+
+describe('foldJournalPage / displayEntries (seed cut)', () => {
+  it('cuts at the seed marker before the boundary prompt', () => {
+    const journal = journalState()
+    foldJournalPage(journal, [ev(SEED_MSG), ev(SEED_END), ev(BOUNDARY)], false)
+    expect(journal.boundaryFound).toBe(true)
+    expect(journal.seedSeq).toBe(2)
+    expect(displayEntries(journal).map(entry => entry.seq)).toEqual([3])
+    expect(transcriptRows(displayEntries(journal))).toEqual([{ kind: 'user', seq: 3, text: '真实问题' }])
+  })
+
+  it('keeps paging when the boundary appears without its marker', () => {
+    const journal = journalState()
+    foldJournalPage(journal, [ev(BOUNDARY), ev(USER_MSG)], true)
+    expect(journal.boundaryFound).toBe(false)
+    expect(journal.hasMore).toBe(true)
+    // The older page carries the marker: boundary resolves on the next fold.
+    foldJournalPage(journal, [ev(SEED_MSG), ev(SEED_END)], false)
+    expect(journal.boundaryFound).toBe(true)
+    expect(journal.seedSeq).toBe(2)
+  })
+
+  it('cuts legacy fork children at the latest seed marker when the log ends', () => {
+    const journal = journalState()
+    foldJournalPage(journal, [ev(SEED_MSG), ev(SEED_END), ev(USER_MSG)], false)
+    expect(journal.boundaryFound).toBe(true)
+    expect(displayEntries(journal).map(entry => entry.seq)).toEqual([4])
+  })
+
+  it('shows everything for spawn children without any seed marker', () => {
+    const journal = journalState()
+    foldJournalPage(journal, [ev(USER_MSG)], false)
+    expect(journal.boundaryFound).toBe(false)
+    expect(displayEntries(journal).map(entry => entry.seq)).toEqual([4])
   })
 })
 
 describe('producedPaths', () => {
-  it('collects diff and edit-call locations in first-seen order, deduped', () => {
-    const entries = [
-      { event: event('tool/call', 1, { name: 'write', arguments: '{"file_path":"src/a.ts"}' }) },
-      { event: event('tool/call', 2, { name: 'edit', arguments: '{"file_path":"src/b.ts","path":"src/a.ts"}' }) },
-      { event: event('tool/call', 3, { name: 'read', arguments: '{"path":"src/c.ts"}' }) },
+  it('collects write/edit/insert paths and excludes failed and non-producing calls', () => {
+    const events = [
+      event('tool/call', 5, { turn: 1, step: 1, callId: 'c1', name: 'write', arguments: '{"file_path":"a.ts"}' }),
+      event('tool/result', 6, { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'c1', isError: false }] } }),
+      event('tool/call', 7, { turn: 1, step: 1, callId: 'c2', name: 'edit', arguments: '{"path":"b.ts"}' }),
+      event('tool/result', 8, { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'c2', isError: true }] } }),
+      event('tool/call', 9, { turn: 1, step: 1, callId: 'c3', name: 'str_replace_editor', arguments: '{"command":"insert","path":"c.ts"}' }),
+      event('tool/result', 10, { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'c3', isError: false }] } }),
+      event('tool/call', 11, { turn: 1, step: 1, callId: 'c4', name: 'str_replace_editor', arguments: '{"command":"view","path":"c.ts"}' }),
+      event('tool/result', 12, { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'c4', isError: false }] } }),
+      event('tool/call', 13, { turn: 1, step: 1, callId: 'c5', name: 'read', arguments: '{"path":"d.ts"}' }),
+      event('tool/result', 14, { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'c5', isError: false }] } }),
     ]
-    expect(producedPaths(entries)).toEqual(['src/a.ts', 'src/b.ts'])
+    expect(producedPaths(events)).toEqual(['a.ts', 'c.ts'])
   })
+})
 
-  it('cuts the inherited seed and excludes failed calls', () => {
-    const entries = [
-      { event: event('tool/call', 1, { name: 'write', arguments: '{"file_path":"parent-only.ts"}', callId: 'p1' }) },
-      { event: event('session/end-seed', 2, {}) },
-      { event: event('tool/call', 3, { name: 'write', arguments: '{"file_path":"failed.ts"}', callId: 'c1' }) },
-      { event: event('tool/result', 4, { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] }, error: { name: 'E', code: 'C' } }) },
-      { event: event('tool/call', 5, { name: 'write', arguments: '{"file_path":"made.ts"}', callId: 'c2' }) },
-      { event: event('tool/result', 6, { message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [] }] } }) },
-    ]
-    expect(producedPaths(entries)).toEqual(['made.ts'])
-  })
-
-  it('ignores missing paths and non-mutation kinds', () => {
-    const entries = [
-      { event: event('tool/call', 1, { name: 'x', arguments: '{}' }) },
-      { event: event('tool/call', 2, { name: 'y', arguments: '{}' }) },
-      { event: event('tool/call', 3, { name: 'z', arguments: '{"path":"z.ts"}' }) },
-    ]
-    expect(producedPaths(entries)).toEqual([])
+describe('resultViewSummary', () => {
+  it('flattens content blocks and returns undefined for empty content', () => {
+    expect(resultViewSummary([textBlock('结果')])).toBe('结果')
+    expect(resultViewSummary([])).toBeUndefined()
   })
 })
 
 describe('mergeProduced', () => {
-  it('unions vocabularies in first-seen order, deduped', () => {
+  it('unions vocabularies keeping first-seen order', () => {
     expect(mergeProduced(['a', 'b'], ['b', 'c'])).toEqual(['a', 'b', 'c'])
-    expect(mergeProduced([], ['a'])).toEqual(['a'])
-  })
-})
-
-describe('fetchTranscript', () => {
-  beforeEach(() => {
-    // The seed-boundary cache is module-scoped; each test starts clean.
-    resetSeedBoundaryCache()
-  })
-
-  const record = (event: SessionEvent): { type: 'event'; event: SessionEvent } => ({ type: 'event', event })
-  const snapshot = (records: readonly { type: 'event'; event: SessionEvent }[], hasMore: boolean) => ({
-    type: 'snapshot' as const, cursor: 200, records, hasMore, header: {}, projections: {},
-  })
-  const remote = (
-    followSnapshots: readonly ReturnType<typeof snapshot>[],
-    pages: readonly { records: readonly { type: 'event'; event: SessionEvent }[]; hasMore: boolean }[],
-  ) => {
-    const followQueue = [...followSnapshots]
-    const pageQueue = [...pages]
-    const follow = vi.fn(async function* () { yield followQueue.shift()! })
-    const page = vi.fn(async () => ({ ok: true as const, value: pageQueue.shift()! }))
-    return { follow, page }
-  }
-
-  it('maps the alpha follow snapshot to transcript rows', async () => {
-    const sessions = remote([snapshot([
-      record(event('user/message', 1, { content: [{ type: 'text', text: '嗨' }] })),
-      record(event('assistant/message', 2, { message: { content: [{ type: 'text', text: '你好' }] } })),
-    ], false)], [])
-    const result = await fetchTranscript(sessions as never, ADDRESS)
-    expect(sessions.follow).toHaveBeenCalledWith({
-      address: { kind: 'subagent', parentSessionId: ADDRESS.parentSessionId, childSessionId: CHILD, mode: 'continuable' },
-      maxMessages: 8,
-    })
-    expect(result).toEqual({
-      rows: [
-        { kind: 'user', seq: 1, text: '嗨' },
-        { kind: 'assistant', seq: 2, text: '你好' },
-      ],
-      produced: [],
-    })
-  })
-
-  it('expands alpha packed assistant chunks before rendering', async () => {
-    const sessions = remote([snapshot([
-      record(event('session/end-seed', 1, {})),
-      {
-        type: 'chunks',
-        event: {
-          type: 'chunkrow/text-chunks', seq: 2, time: 0,
-          data: { turn: 1, step: 1, index: 0, dt: [1], texts: ['你', '好'] },
-        },
-      } as never,
-    ], false)], [])
-    const result = await fetchTranscript(sessions as never, ADDRESS)
-    expect(result?.rows).toEqual([{ kind: 'assistant', seq: 2, text: '你好' }])
-  })
-
-  it('walks backward to the seed boundary and cuts the inherited fork seed', async () => {
-    // Page 1 (tail): a continuation marker followed by the newest turn.
-    const sessions = remote([snapshot([
-      record(event('session/end-seed', 100, {})),
-      record(event('user/message', 110, { content: [{ type: 'text', text: '第二问' }] })),
-      record(event('assistant/message', 111, { message: { content: [{ type: 'text', text: '第二个答案' }] } })),
-    ], true)], [{
-      records: [
-        record(event('session/end-seed', 80, {})),
-        record(event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] })),
-        record(event('user/message', 90, { content: [{ type: 'text', text: '第一问' }] })),
-        record(event('assistant/message', 91, { message: { content: [{ type: 'text', text: '第一个答案' }] } })),
-      ], hasMore: false,
-    }])
-    const result = await fetchTranscript(sessions as never, ADDRESS)
-    expect(sessions.page).toHaveBeenCalledWith(expect.objectContaining({ throughSeq: 200, beforeSeq: 100 }))
-    // Only the child's own conversation survives the cut.
-    expect(result).toEqual({
-      rows: [
-        { kind: 'user', seq: 90, text: '第一问' },
-        { kind: 'assistant', seq: 91, text: '第一个答案' },
-        { kind: 'user', seq: 110, text: '第二问' },
-        { kind: 'assistant', seq: 111, text: '第二个答案' },
-      ],
-      produced: [],
-    })
-  })
-
-  it('dedupes overlapping page boundaries when the host page is inclusive', async () => {
-    const sessions = remote([snapshot([
-      record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] })),
-      record(event('user/message', 92, { content: [{ type: 'text', text: '问' }] })),
-    ], true)], [{
-      records: [record(event('session/end-seed', 80, {})), record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] }))],
-      hasMore: false,
-    }])
-    const result = await fetchTranscript(sessions as never, ADDRESS)
-    expect(result).toEqual({
-      rows: [
-        { kind: 'user', seq: 90, text: '旧问' },
-        { kind: 'user', seq: 92, text: '问' },
-      ],
-      produced: [],
-    })
-  })
-
-  it('reuses the cached seed boundary — later reads fetch one page only', async () => {
-    // First read: the walk locates the boundary (page 2 has the end-seed).
-    const sessions = remote([
-      snapshot([record(event('user/message', 90, { content: [{ type: 'text', text: '旧问' }] })), record(event('assistant/message', 91, { message: { content: [{ type: 'text', text: '旧答' }] } }))], true),
-      snapshot([record(event('user/message', 92, { content: [{ type: 'text', text: '新问' }] })), record(event('assistant/message', 93, { message: { content: [{ type: 'text', text: '新答' }] } }))], false),
-    ], [{ records: [record(event('session/end-seed', 80, {})), record(event('user/message', 81, { content: [{ type: 'text', text: 'Side conversation boundary' }] }))], hasMore: false }])
-    const first = await fetchTranscript(sessions as never, ADDRESS)
-    expect(first).toEqual({
-      rows: [
-        { kind: 'user', seq: 90, text: '旧问' },
-        { kind: 'assistant', seq: 91, text: '旧答' },
-      ],
-      produced: [],
-    })
-    expect(sessions.page).toHaveBeenCalledWith(expect.objectContaining({ beforeSeq: 90 }))
-    // Cached: exactly one fetch, no beforeSeq walk.
-    const second = await fetchTranscript(sessions, ADDRESS)
-    expect(sessions.follow).toHaveBeenCalledTimes(2)
-    expect(second).toEqual({
-      rows: [
-        { kind: 'user', seq: 90, text: '旧问' },
-        { kind: 'assistant', seq: 91, text: '旧答' },
-        { kind: 'user', seq: 92, text: '新问' },
-        { kind: 'assistant', seq: 93, text: '新答' },
-      ],
-      produced: [],
-    })
-  })
-
-  it('extracts produced files from alpha tool arguments', async () => {
-    const sessions = remote([snapshot([record(event('tool/call', 1, { name: 'write', arguments: '{"file_path":"/w/src/a.ts"}' }))], false)], [])
-    const result = await fetchTranscript(sessions as never, ADDRESS)
-    expect(result).toEqual({
-      rows: [{
-        kind: 'tool', seq: 1, name: 'write', failed: false,
-        detail: { arguments: '{"file_path":"/w/src/a.ts"}' },
-      }],
-      produced: ['/w/src/a.ts'],
-    })
-  })
-
-  it('returns null on business failure', async () => {
-    const follow = vi.fn(async function* () { yield { type: 'error' as const } as never })
-    expect(await fetchTranscript({ follow } as never, ADDRESS)).toBeNull()
-  })
-
-  it('returns null on transport failure', async () => {
-    const follow = vi.fn(async function* () { throw new Error('network') })
-    expect(await fetchTranscript({ follow } as never, ADDRESS)).toBeNull()
   })
 })
 
 describe('sendPrompt', () => {
-  it('delivers a text block through subagent.prompt', async () => {
-    const prompt = vi.fn(() => Promise.resolve({ ok: true }))
-    const accepted = await sendPrompt({ prompt } as never, ADDRESS, '继续')
-    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
-      ...ADDRESS,
-      content: [{ type: 'text', text: '继续' }],
-      requestId: expect.any(String),
-    }))
+  it('routes the text through the generated subagents namespace', async () => {
+    const prompt = vi.fn((_request: unknown) => Promise.resolve({ ok: true, value: {} }))
+    const accepted = await sendPrompt({ prompt } as never, ADDRESS as Extract<SubagentAddress, { mode: 'continuable' }>, '继续')
     expect(accepted).toBe(true)
+    const request = prompt.mock.calls[0]?.[0] as { requestId: string } | undefined
+    expect(request).toMatchObject({
+      parentSessionId: PARENT,
+      childSessionId: CHILD,
+      mode: 'continuable',
+      content: [{ type: 'text', text: '继续' }],
+    })
+    expect(typeof request?.requestId).toBe('string')
+  })
+})
+
+describe('readChildTranscript / readChildActivity (journal integration)', () => {
+  it('opens one journal per child and returns the seed-cut rows', async () => {
+    SessionEventStream.nextOpen.push({
+      page: { records: [], hasMore: false },
+      entries: [ev(SEED_MSG), ev(SEED_END), ev(BOUNDARY)],
+      hasMore: false,
+      live: [ev(event('assistant/message', 5, {
+        turn: 1, step: 1,
+        message: { role: 'assistant', content: [textBlock('回答')] },
+      }))],
+    })
+    const remotes = fakeRemotes()
+    const first = await readChildTranscript(remotes, ADDRESS)
+    expect(first).toEqual({
+      rows: [
+        { kind: 'user', seq: 3, text: '真实问题' },
+        { kind: 'assistant', seq: 5, text: '回答' },
+      ],
+      produced: [],
+    })
+    // The journal is reused: no second stream instance for the same child.
+    const second = await readChildTranscript(remotes, ADDRESS)
+    expect(second?.rows).toEqual(first?.rows)
+    expect(SessionEventStream.instances).toHaveLength(1)
   })
 
-  it('returns false on rejection', async () => {
-    const prompt = vi.fn(() => Promise.resolve({ ok: false }))
-    expect(await sendPrompt({ prompt } as never, ADDRESS, '继续')).toBe(false)
+  it('walks older pages until the boundary marker is found', async () => {
+    SessionEventStream.nextOpen.push({
+      page: { records: [], hasMore: false },
+      entries: [ev(BOUNDARY)],
+      hasMore: true,
+    })
+    SessionEventStream.nextPrepend.push({
+      page: { records: [], hasMore: false },
+      entries: [ev(SEED_MSG), ev(SEED_END)],
+      hasMore: false,
+    })
+    const result = await readChildTranscript(fakeRemotes(), ADDRESS)
+    expect(result?.rows).toEqual([{ kind: 'user', seq: 3, text: '真实问题' }])
+  })
+
+  it('derives the live activity line from the journal tail', async () => {
+    SessionEventStream.nextOpen.push({
+      page: { records: [], hasMore: false },
+      entries: [
+        ev(SEED_MSG), ev(SEED_END), ev(BOUNDARY),
+        ev(event('tool/call', 5, { turn: 1, step: 1, callId: 'c1', name: 'grep', arguments: '{"pattern":"x"}' })),
+      ],
+      hasMore: false,
+    })
+    const line = await readChildActivity(fakeRemotes(), ADDRESS)
+    expect(line).toBe('🔧 grep · x')
+  })
+
+  it('returns null when the journal fails to open', async () => {
+    const journal = ensureChildJournal(fakeRemotes(), ADDRESS, 8)
+    journal.failed = true
+    expect(await readChildTranscript(fakeRemotes(), ADDRESS)).toBeNull()
   })
 })

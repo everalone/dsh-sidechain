@@ -20,7 +20,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { SideCommandCard } from './SideCommandCard.tsx'
 import { SidechainPanel, SidechainPanelToggle, type SidechainPanelInjected } from './SidechainPanel.tsx'
 import { installSidechainStyle } from './panel-style.ts'
-import { fetchActivity, fetchTranscript, sendPrompt } from './sidechain-view.ts'
+import {
+  readChildActivity, readChildTranscript, sendPrompt,
+  type JournalRemotes,
+} from './sidechain-view.ts'
 import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
@@ -37,6 +40,15 @@ export const inject = [
 export function apply(ctx: Context): void {
   const sessions = ctx.sessions
   const subagents = ctx.remote.subagents
+  // The journal layer consumes the generated namespaces through the same
+  // structural face the Session runtime uses (session / subagents / commands
+  // namespaces plus the Gateway stream factory).
+  const remotes: JournalRemotes = {
+    $stream: (options) => ctx.remote.$stream(options),
+    commands: ctx.remote.commands,
+    session: ctx.remote.session,
+    subagents: ctx.remote.subagents,
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-sidechain: sidechain dictionaries')
   // One shared keyframe stylesheet (shimmer sweep); the effect's disposer
   // removes it with the fiber — hot unload leaves no stray <style> tags.
@@ -60,10 +72,10 @@ export function apply(ctx: Context): void {
   )
   const panelInject = (_parentSessionId: SessionId): SidechainPanelInjected => ({
     readTranscript(address: SubagentAddress) {
-      return fetchTranscript(ctx.remote.session, address)
+      return readChildTranscript(remotes, address)
     },
     readActivity(address: SubagentAddress) {
-      return fetchActivity(ctx.remote.session, address)
+      return readChildActivity(remotes, address)
     },
     sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
       return sendPrompt(subagents, address, text)
